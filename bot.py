@@ -2,100 +2,199 @@ import streamlit as st
 import telebot
 from telebot import types
 import whisper
-import os, pytz, threading, json
+import os
+import json
+import threading
+import pytz
 from datetime import datetime
+from deep_translator import GoogleTranslator
 
 # --- 1. SOZLAMALAR ---
-# ⚠️ BU YERGA BIRINCHI (WEB) SAYTINGIZ LINKINI QO'YING!
+# ⚠️ BU YERGA ASOSIY SAYTINGIZ (WEB PLAYER) LINKINI QO'YING!
 WEB_APP_URL = "https://shodlik1transcript.streamlit.app"
 uz_tz = pytz.timezone('Asia/Tashkent')
 
-@st.cache_resource
-def load_model():
-    # RAMni tejash uchun 'tiny' model
-    return whisper.load_model("tiny")
-
-model = load_model()
-
 try:
-    bot = telebot.TeleBot(st.secrets["BOT_TOKEN"])
+    BOT_TOKEN = st.secrets["BOT_TOKEN"]
 except:
-    st.error("Secrets-da BOT_TOKEN topilmadi!")
+    st.error("❌ Secrets-da BOT_TOKEN topilmadi!")
     st.stop()
 
-# Server yuzasi (oddiy status sahifasi)
+# RAMni tejash uchun 'tiny' modeldan foydalanamiz
+@st.cache_resource
+def load_ai_model():
+    return whisper.load_model("tiny")
+
+model = load_ai_model()
+bot = telebot.TeleBot(BOT_TOKEN)
+
+# Streamlit interfeysi (Server holati uchun)
 st.set_page_config(page_title="Bot Server", page_icon="🤖")
 st.title("🤖 Neon Karaoke Bot Server")
-st.markdown(f"**Holat:** 🟢 Online")
-st.markdown(f"**Ulanish:** [Asosiy Sayt]({WEB_APP_URL})")
+st.success("Bot tizimi muvaffaqiyatli ishga tushdi!")
+st.info(f"Bot manzili: @{bot.get_me().username}")
 
-# --- 2. BOT MANTIQI ---
-def run_bot():
-    @bot.message_handler(commands=['start'])
-    def start_msg(m):
-        # Saytga ID bilan link beramiz
-        link = f"{WEB_APP_URL}/?uid={m.chat.id}"
-        
-        menu = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
-        menu.add(types.KeyboardButton("🌐 Saytga kirish (Login)"), types.KeyboardButton("ℹ️ Yordam"))
-        
-        inline_markup = types.InlineKeyboardMarkup()
-        inline_markup.add(types.InlineKeyboardButton("🚀 Neon Saytni Ochish", url=link))
-        
-        bot.send_message(m.chat.id, 
-                         f"👋 **Assalomu alaykum!**\n\n"
-                         f"Menga audio yuboring yoki Neon Playerdan foydalanish uchun saytga o'ting:", 
-                         reply_markup=menu)
-        bot.send_message(m.chat.id, "👇 Saytga kirish tugmasi:", reply_markup=inline_markup)
+# Foydalanuvchi ma'lumotlarini saqlash (Vaqtinchalik)
+user_data = {}
 
-    @bot.message_handler(func=lambda message: message.text == "🌐 Saytga kirish (Login)")
-    def open_site(m):
-        link = f"{WEB_APP_URL}/?uid={m.chat.id}"
-        markup = types.InlineKeyboardMarkup()
-        markup.add(types.InlineKeyboardButton("🚀 Saytni Ochish", url=link))
-        bot.reply_to(m, "Sizning shaxsiy havolangiz:", reply_markup=markup)
+# --- 2. YORDAMCHI FUNKSIYALAR ---
+def get_uz_time():
+    return datetime.now(uz_tz).strftime('%H:%M:%S')
 
-    @bot.message_handler(content_types=['audio', 'voice'])
-    def handle_audio(m):
-        path = f"bot_tmp_{m.chat.id}_{int(datetime.now().timestamp())}.mp3"
+def delete_user_messages(chat_id, message_ids):
+    for m_id in message_ids:
+        try: bot.delete_message(chat_id, m_id)
+        except: pass
+
+# --- 3. BOT MANTIQI ---
+
+@bot.message_handler(commands=['start'])
+def welcome(m):
+    # Asosiy menyu tugmalari
+    menu = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
+    menu.add(types.KeyboardButton("🌐 Saytga kirish (Login)"), types.KeyboardButton("ℹ️ Yordam"))
+    
+    msg_text = (
+        "👋 **Assalomu alaykum!**\n\n"
+        "Men audio fayllarni matnga aylantirib beruvchi aqlli botman.\n\n"
+        "**Imkoniyatlarim:**\n"
+        "✅ Audioni matnga aylantirish (Transcription)\n"
+        "✅ Matnni boshqa tillarga tarjima qilish\n"
+        "✅ Saytda Neon Player orqali ko'rish\n"
+        "✅ Har xil formatda natija olish\n\n"
+        "🚀 Boshlash uchun menga **audio yoki ovozli xabar** yuboring!"
+    )
+    bot.send_message(m.chat.id, msg_text, parse_mode="Markdown", reply_markup=menu)
+
+@bot.message_handler(func=lambda message: message.text == "ℹ️ Yordam")
+def help_command(m):
+    help_text = (
+        "📖 **Botdan foydalanish qo'llanmasi:**\n\n"
+        "1️⃣ **Audio yuboring:** MP3 yoki Ovozli xabar tashlang.\n"
+        "2️⃣ **Tilni tanlang:** Matn qaysi tilda chiqishini belgilang.\n"
+        "3️⃣ **Formatni tanlang:** Natijani fayl (TXT) yoki to'g'ridan-to'g'ri chatda xabar ko'rinishida oling.\n\n"
+        "✨ **Neon Sayt:** Har bir natija ostida 'Jonli Subtitel' tugmasi bo'ladi. Uni bossangiz, saytga o'tasiz va audioni so'zma-so'z neon effektida ko'rasiz."
+    )
+    bot.reply_to(m, help_text, parse_mode="Markdown")
+
+@bot.message_handler(func=lambda message: message.text == "🌐 Saytga kirish (Login)")
+def site_login(m):
+    link = f"{WEB_APP_URL}/?uid={m.chat.id}"
+    markup = types.InlineKeyboardMarkup()
+    markup.add(types.InlineKeyboardButton("🚀 Neon Saytni Ochish", url=link))
+    bot.send_message(m.chat.id, "Sizning shaxsiy havolangiz orqali sayt sizni taniydi va natijalarni avtomatik yuboradi:", reply_markup=markup)
+
+# --- AUDIO QABUL QILISH ---
+@bot.message_handler(content_types=['audio', 'voice'])
+def audio_handler(m):
+    # Tozalash uchun xabarlarni yig'amiz
+    user_data[m.chat.id] = {'m_ids': [m.message_id]}
+    
+    # 1. Til tanlash
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    markup.add(
+        types.InlineKeyboardButton("📄 Original", callback_data="lang_orig"),
+        types.InlineKeyboardButton("🇺🇿 O'zbekcha", callback_data="lang_uz"),
+        types.InlineKeyboardButton("🇷🇺 Ruscha", callback_data="lang_ru"),
+        types.InlineKeyboardButton("🇬🇧 Inglizcha", callback_data="lang_en")
+    )
+    
+    msg = bot.send_message(m.chat.id, "🛑 **DIQQAT:** Tilni tanlash orqali matn avtomatik tarjima qilinadi. Kerakli tilni tanlang:", 
+                           parse_mode="Markdown", reply_markup=markup)
+    user_data[m.chat.id]['m_ids'].append(msg.message_id)
+    
+    # Fayl ID ni saqlab qo'yamiz
+    fid = m.audio.file_id if m.content_type == 'audio' else m.voice.file_id
+    user_data[m.chat.id]['fid'] = fid
+    user_data[m.chat.id]['fname'] = m.audio.file_name if m.content_type == 'audio' else "Ovozli_xabar.ogg"
+
+# --- TUGMALAR ISHLOVCHISI ---
+@bot.callback_query_handler(func=lambda call: True)
+def callback_query(call):
+    chat_id = call.message.chat.id
+    
+    if call.data.startswith("lang_"):
+        lang = call.data.replace("lang_", "")
+        user_data[chat_id]['lang'] = lang
+        
+        # 2. Format tanlash
+        markup = types.InlineKeyboardMarkup(row_width=2)
+        markup.add(
+            types.InlineKeyboardButton("📁 TXT Fayl", callback_data="fmt_txt"),
+            types.InlineKeyboardButton("💬 Chatda olish", callback_data="fmt_chat")
+        )
+        msg = bot.edit_message_text("Qanday formatda olishni xohlaysiz?", chat_id, call.message.message_id, reply_markup=markup)
+
+    elif call.data.startswith("fmt_"):
+        fmt = call.data.replace("fmt_", "")
+        lang = user_data[chat_id]['lang']
+        fid = user_data[chat_id]['fid']
+        
+        # Eski xabarlarni o'chirish (faqat tahlil boshlangani qoladi)
+        delete_user_messages(chat_id, user_data[chat_id]['m_ids'])
+        
+        wait_msg = bot.send_message(chat_id, "⏳ **Tahlil ketmoqda...** Bu bir necha daqiqa olishi mumkin.", parse_mode="Markdown")
+        
+        # TAHLIL JARAYONI
         try:
-            bot.reply_to(m, "⏳ Tahlil qilinmoqda... (Server 2)")
-            
-            fid = m.audio.file_id if m.content_type=='audio' else m.voice.file_id
             f_info = bot.get_file(fid)
             down = bot.download_file(f_info.file_path)
-            
+            path = f"tmp_{chat_id}.mp3"
             with open(path, "wb") as f: f.write(down)
             
-            # Whisper tahlil
-            result = model.transcribe(path)
+            # Whisper
+            res = model.transcribe(path)
             
-            txt = f"TRANSKRIPSIYA (BOT)\nSana: {datetime.now(uz_tz).strftime('%Y-%m-%d %H:%M')}\n\n"
-            for s in result['segments']:
+            # Tarjima
+            t_code = {"uz": "uz", "ru": "ru", "en": "en"}.get(lang)
+            final_text = ""
+            for s in res['segments']:
                 tm = f"[{int(s['start']//60):02d}:{int(s['start']%60):02d}]"
-                txt += f"{tm} {s['text'].strip()}\n"
+                orig = s['text'].strip()
+                if t_code:
+                    trans = GoogleTranslator(source='auto', target=t_code).translate(orig)
+                    final_text += f"{tm} {orig}\n Tarjima: {trans}\n\n"
+                else:
+                    final_text += f"{tm} {orig}\n\n"
             
-            txt += "\n---\n© Shodlik (Otavaliyev_M)"
+            # Imzo va vaqt
+            footer = (
+                f"\n---\n"
+                f"👤 Dasturchi: @Otavaliyev_M\n"
+                f"🤖 Bot: @{bot.get_me().username}\n"
+                f"⏰ Vaqt: {get_uz_time()} (UZB)"
+            )
             
-            # Saytga o'tish tugmasi
-            link = f"{WEB_APP_URL}/?uid={m.chat.id}"
-            mark = types.InlineKeyboardMarkup()
-            mark.add(types.InlineKeyboardButton("🎵 Saytda Pleyerda ochish", url=link))
-            
-            with open("bot_res.txt", "w", encoding="utf-8") as f: f.write(txt)
-            with open("bot_res.txt", "rb") as f:
-                bot.send_document(m.chat.id, f, caption="✅ Tahlil tayyor!", reply_markup=mark)
-            
-            os.remove("bot_res.txt")
-        except Exception as e:
-            bot.send_message(m.chat.id, f"Xato yuz berdi: {e}")
-        finally:
-            if os.path.exists(path): os.remove(path)
+            # Saytga link
+            site_link = f"{WEB_APP_URL}/?uid={chat_id}"
+            markup = types.InlineKeyboardMarkup()
+            markup.add(types.InlineKeyboardButton("✨ JONLI SUBTITEL (SAYT)", url=site_link))
 
+            if fmt == "txt":
+                with open("res.txt", "w", encoding="utf-8") as f: f.write(final_text + footer)
+                with open("res.txt", "rb") as f:
+                    bot.send_document(chat_id, f, caption=f"✅ Natija tayyor!\nFayl: {user_data[chat_id]['fname']}", reply_markup=markup)
+                os.remove("res.txt")
+            else:
+                # Chatga yuborish (Telegram limiti 4096 belgi)
+                if len(final_text + footer) > 4000:
+                    bot.send_message(chat_id, final_text[:4000] + "...")
+                    bot.send_message(chat_id, footer, reply_markup=markup)
+                else:
+                    bot.send_message(chat_id, final_text + footer, reply_markup=markup)
+
+            bot.delete_message(chat_id, wait_msg.message_id)
+            os.remove(path)
+            
+        except Exception as e:
+            bot.send_message(chat_id, f"❌ Xatolik yuz berdi: {e}")
+
+# Botni alohida oqimda ishga tushirish
+def run_polling():
     bot.infinity_polling()
 
-# Botni orqa fonda ishga tushirish
 if 'bot_thread' not in st.session_state:
     st.session_state['bot_thread'] = True
-    t = threading.Thread(target=run_bot, daemon=True)
-    t.start()
+    threading.Thread(target=run_polling, daemon=True).start()
+
+st.markdown('<div style="position:fixed; bottom:0; right:0; padding:10px; color:lime;">● Bot Status: Active</div>', unsafe_allow_html=True)
