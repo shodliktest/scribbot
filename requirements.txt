@@ -1,4 +1,5 @@
 streamlit
 pyTelegramBotAPI
 openai-whisper
+deep-translator
 pytz
