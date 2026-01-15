@@ -1,153 +1,187 @@
 import streamlit as st
-import os, json, base64, pytz, time
+import telebot
+from telebot import types
+from groq import Groq  # Whisper o'rniga Groq
+import os
+import json
+import threading
+import pytz
+import time
 from datetime import datetime
 from deep_translator import GoogleTranslator
-from groq import Groq
 
 # --- 1. SOZLAMALAR ---
+WEB_APP_URL = "https://shodlik1transcript.streamlit.app"
 uz_tz = pytz.timezone('Asia/Tashkent')
 
 try:
-    GROQ_API_KEY = st.secrets["GROQ_API_KEY"]
-    client = Groq(api_key=GROQ_API_KEY)
-except Exception:
-    st.error("❌ Secrets bo'limida 'GROQ_API_KEY' topilmadi!")
+    BOT_TOKEN = st.secrets["BOT_TOKEN"]
+    GROQ_API_KEY = st.secrets["GROQ_API_KEY"] # Groq kalitini olamiz
+except:
+    st.error("❌ Secrets-da BOT_TOKEN yoki GROQ_API_KEY topilmadi!")
     st.stop()
 
-st.set_page_config(page_title="Neon Karaoke Web", layout="centered")
+# Groq Clientni ishga tushiramiz
+client = Groq(api_key=GROQ_API_KEY)
+bot = telebot.TeleBot(BOT_TOKEN)
 
-# --- 2. KUCHAYTIRILGAN NEON DIZAYN ---
-st.markdown("""
-<style>
-    #MainMenu {visibility: hidden;} header {visibility: hidden;} footer {visibility: hidden;}
-    .stDeployButton {display:none;}
-    .stApp { background-color: #000000 !important; color: white !important; }
-    h1, h2, h3 { text-align: center; color: #fff; text-shadow: 0 0 10px #00e5ff, 0 0 20px #00e5ff; font-weight: bold; }
+# Streamlit interfeysi
+st.set_page_config(page_title="Bot Server", page_icon="🤖")
+st.title("🤖 Neon Karaoke Bot Server (Groq Edition)")
+st.success("Bot tizimi muvaffaqiyatli ishga tushdi!")
+st.info(f"Bot manzili: @{bot.get_me().username}")
 
-    /* Neon Progress Slider */
-    .stProgress > div > div > div > div {
-        background-image: linear-gradient(to right, #00e5ff, #00ff88) !important;
-        box-shadow: 0 0 20px #00e5ff;
-        border-radius: 10px;
-    }
+user_data = {}
 
-    /* Fayl yuklash (Belgilar olib tashlangan) */
-    [data-testid="stFileUploader"] section { 
-        background-color: #000 !important; 
-        border: 3px dashed #00e5ff !important; 
-        border-radius: 20px;
-        padding: 50px 20px !important;
-    }
-    [data-testid="stFileUploader"] section svg { display: none !important; }
-    [data-testid="stFileUploader"] section div div { font-size: 0px !important; }
+# --- 2. YORDAMCHI FUNKSIYALAR ---
+def get_uz_time():
+    return datetime.now(uz_tz).strftime('%H:%M:%S')
 
-    [data-testid="stFileUploader"] button {
-         background-color: #000 !important;
-         color: #00e5ff !important;
-         border: 2px solid #00e5ff !important;
-         box-shadow: 0 0 20px #00e5ff;
-         border-radius: 10px;
-         font-weight: bold;
-         font-size: 18px !important;
-         padding: 12px 25px !important;
-         display: block !important; margin: 0 auto !important;
-    }
-    [data-testid="stFileUploader"] button span::before { content: "FAYL TANLASH UCHUN BOSING"; visibility: visible; }
-    [data-testid="stFileUploader"] button span { visibility: hidden; }
+def delete_user_messages(chat_id, message_ids):
+    for m_id in message_ids:
+        try: bot.delete_message(chat_id, m_id)
+        except: pass
 
-    .limit-text { color: #ff0055; text-shadow: 0 0 10px #ff0055; font-weight: bold; text-align: center; margin-bottom: 15px; }
+# --- 3. BOT MANTIQI ---
 
-    /* Neon Player Box */
-    .neon-box { background: #050505; border: 2px solid #00e5ff; box-shadow: 0 0 25px rgba(0,229,255,0.4); border-radius: 20px; padding: 25px; margin-top: 25px; }
+@bot.message_handler(commands=['start'])
+def welcome(m):
+    menu = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
+    menu.add(types.KeyboardButton("🌐 Saytga kirish (Login)"), types.KeyboardButton("ℹ️ Yordam"))
     
-    div.stButton > button, div.stDownloadButton > button {
-        background-color: #000 !important; color: #00e5ff !important; border: 2px solid #00e5ff !important;
-        box-shadow: 0 0 15px #00e5ff; border-radius: 12px; font-weight: bold; width: 100%; text-transform: uppercase;
-    }
-</style>
-""", unsafe_allow_html=True)
+    msg_text = (
+        "👋 **Assalomu alaykum!**\n\n"
+        "Men audio fayllarni matnga aylantirib beruvchi aqlli botman.\n\n"
+        "**Imkoniyatlarim:**\n"
+        "✅ **Groq API** orqali o'ta tezkor transcription\n"
+        "✅ Matnni boshqa tillarga tarjima qilish\n"
+        "✅ Saytda Neon Player orqali ko'rish\n\n"
+        "🚀 Boshlash uchun menga **audio yoki ovozli xabar** yuboring!"
+    )
+    bot.send_message(m.chat.id, msg_text, parse_mode="Markdown", reply_markup=menu)
 
-# --- 3. PLAYER KOMPONENTI ---
-def render_neon_player(audio_bytes, transcript_data):
-    b64 = base64.b64encode(audio_bytes).decode()
-    transcript_json = json.dumps(transcript_data)
-    html = f"""
-    <div class="neon-box">
-        <h3 style="text-align:center; color:#00e5ff;">🎵 NEON KARAOKE PLAYER 🎵</h3>
-        <audio id="player" controls style="width:100%; filter:invert(1) drop-shadow(0 0 8px #00e5ff); margin-bottom:15px;">
-            <source src="data:audio/mp3;base64,{b64}" type="audio/mp3">
-        </audio>
-        <div id="lyrics" style="height:450px; overflow-y:auto; scroll-behavior:smooth; padding:15px; border-top:1px solid #333;"></div>
-    </div>
-    <script>
-        const audio = document.getElementById('player');
-        const box = document.getElementById('lyrics');
-        const data = {transcript_json};
-        data.forEach((line, i) => {{
-            const div = document.createElement('div');
-            div.id = 'L-'+i; div.style.padding='15px'; div.style.borderBottom='1px solid #222'; div.style.cursor='pointer';
-            div.innerHTML = `<div style="font-size:22px; font-weight:bold; color:#444;">${{line.text}}</div>` + 
-                            (line.tr ? `<div style="font-size:17px; color:#333; margin-top:5px;">${{line.tr}}</div>` : '');
-            div.onclick = () => {{ audio.currentTime = line.start; audio.play(); }};
-            box.appendChild(div);
-        }});
-        audio.ontimeupdate = () => {{
-            let idx = data.findIndex(x => audio.currentTime >= x.start && audio.currentTime < x.end);
-            data.forEach((_, i) => {{ 
-                let el = document.getElementById('L-'+i);
-                if(el) {{ el.children[0].style.color='#444'; el.style.borderLeft='none'; }}
-            }});
-            if(idx !== -1){{
-                let el = document.getElementById('L-'+idx);
-                if(el) {{ 
-                    el.children[0].style.color='#00e5ff'; el.style.borderLeft='5px solid #00e5ff';
-                    el.scrollIntoView({{behavior:'smooth', block:'center'}});
-                }}
-            }}
-        }};
-    </script>
-    """
-    st.components.v1.html(html, height=620)
+@bot.message_handler(func=lambda message: message.text == "ℹ️ Yordam")
+def help_command(m):
+    help_text = (
+        "📖 **Botdan foydalanish qo'llanmasi:**\n\n"
+        "1️⃣ **Audio yuboring:** MP3 yoki Ovozli xabar.\n"
+        "2️⃣ **Tilni tanlang:** Avtomatik tarjima uchun.\n"
+        "3️⃣ **Formatni tanlang:** TXT yoki Chat xabari."
+    )
+    bot.reply_to(m, help_text, parse_mode="Markdown")
 
-# --- 4. ASOSIY WEB LOGIKA ---
-st.title("🎧 NEON TRANSCRIPT WEB")
-st.markdown('<p class="limit-text">⚠️ MAKSIMAL 25MB | MP3, WAV</p>', unsafe_allow_html=True)
+@bot.message_handler(func=lambda message: message.text == "🌐 Saytga kirish (Login)")
+def site_login(m):
+    link = f"{WEB_APP_URL}/?uid={m.chat.id}"
+    markup = types.InlineKeyboardMarkup()
+    markup.add(types.InlineKeyboardButton("🚀 Neon Saytni Ochish", url=link))
+    bot.send_message(m.chat.id, "Shaxsiy havola:", reply_markup=markup)
 
-up = st.file_uploader("", type=['mp3', 'wav'], label_visibility="collapsed")
-lang = st.selectbox("Tarjima tili:", ["🇺🇿 O'zbek", "🇷🇺 Rus", "🇬🇧 Ingliz", "📄 Original"], index=3)
-
-if st.button("🚀 TAHLILNI BOSHLASH") and up:
-    path = f"t_{time.time()}.mp3"
-    progress_placeholder = st.empty()
+@bot.message_handler(content_types=['audio', 'voice'])
+def audio_handler(m):
+    user_data[m.chat.id] = {'m_ids': [m.message_id]}
     
-    try:
-        with progress_placeholder.container():
-            st.markdown("<p style='color:#00e5ff; text-align:center; font-weight:bold;'>⚡ Jarayon ketmoqda...</p>", unsafe_allow_html=True)
-            bar = st.progress(0)
-            with open(path, "wb") as f: f.write(up.getbuffer())
-            
-            # Slayer Progress Simulation
-            for i in range(1, 41): time.sleep(0.01); bar.progress(i)
-            
-            # Groq API Call
-            with open(path, "rb") as f:
-                res = client.audio.transcriptions.create(file=(path, f.read()), model="whisper-large-v3-turbo", response_format="verbose_json")
-            
-            for i in range(41, 91): time.sleep(0.01); bar.progress(i)
-            
-            p_data = []; txt_out = ""; t_code = {"🇺🇿 O'zbek":"uz","🇷🇺 Rus":"ru","🇬🇧 Ingliz":"en"}.get(lang)
-            for s in res.segments:
-                tr = GoogleTranslator(source='auto', target=t_code).translate(s['text']) if t_code else None
-                p_data.append({"start": s['start'], "end": s['end'], "text": s['text'].strip(), "tr": tr})
-                txt_out += f"[{int(s['start']//60):02d}:{int(s['start']%60):02d}] {s['text'].strip()}\n"
-            
-            bar.progress(100); time.sleep(0.5); progress_placeholder.empty()
-            
-            render_neon_player(up.getvalue(), p_data)
-            st.download_button("📄 TXT YUKLAB OLISH", txt_out, file_name=f"{up.name}.txt")
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    markup.add(
+        types.InlineKeyboardButton("📄 Original", callback_data="lang_orig"),
+        types.InlineKeyboardButton("🇺🇿 O'zbekcha", callback_data="lang_uz"),
+        types.InlineKeyboardButton("🇷🇺 Ruscha", callback_data="lang_ru"),
+        types.InlineKeyboardButton("🇬🇧 Inglizcha", callback_data="lang_en")
+    )
+    
+    msg = bot.send_message(m.chat.id, "🛑 **DIQQAT:** Matn qaysi tilda chiqsin?", 
+                           parse_mode="Markdown", reply_markup=markup)
+    user_data[m.chat.id]['m_ids'].append(msg.message_id)
+    
+    fid = m.audio.file_id if m.content_type == 'audio' else m.voice.file_id
+    user_data[m.chat.id]['fid'] = fid
+    user_data[m.chat.id]['fname'] = m.audio.file_name if m.content_type == 'audio' else "Ovozli_xabar.ogg"
 
-    except Exception as e: st.error(f"Xato: {e}")
-    finally:
-        if os.path.exists(path): os.remove(path)
+@bot.callback_query_handler(func=lambda call: True)
+def callback_query(call):
+    chat_id = call.message.chat.id
+    
+    if call.data.startswith("lang_"):
+        lang = call.data.replace("lang_", "")
+        user_data[chat_id]['lang'] = lang
+        
+        markup = types.InlineKeyboardMarkup(row_width=2)
+        markup.add(
+            types.InlineKeyboardButton("📁 TXT Fayl", callback_data="fmt_txt"),
+            types.InlineKeyboardButton("💬 Chatda olish", callback_data="fmt_chat")
+        )
+        msg = bot.edit_message_text("Formatni tanlang:", chat_id, call.message.message_id, reply_markup=markup)
 
-st.caption("© Shodlik (Otavaliyev_M)")
+    elif call.data.startswith("fmt_"):
+        fmt = call.data.replace("fmt_", "")
+        lang = user_data[chat_id]['lang']
+        fid = user_data[chat_id]['fid']
+        
+        delete_user_messages(chat_id, user_data[chat_id]['m_ids'])
+        wait_msg = bot.send_message(chat_id, "⏳ **O'ta tezkor AI tahlil ketmoqda...**", parse_mode="Markdown")
+        
+        try:
+            f_info = bot.get_file(fid)
+            down = bot.download_file(f_info.file_path)
+            path = f"tmp_{chat_id}.mp3"
+            with open(path, "wb") as f: f.write(down)
+            
+            # --- GROQ TAHLIL QISMI ---
+            with open(path, "rb") as audio_file:
+                transcription = client.audio.transcriptions.create(
+                    file=(path, audio_file.read()),
+                    model="whisper-large-v3-turbo", # Eng kuchli va tezkor model
+                    response_format="verbose_json",
+                )
+            
+            t_code = {"uz": "uz", "ru": "ru", "en": "en"}.get(lang)
+            final_text = ""
+            
+            # Segments orqali vaqtli matnlarni olish
+            for s in transcription.segments:
+                tm = f"[{int(s['start']//60):02d}:{int(s['start']%60):02d}]"
+                orig = s['text'].strip()
+                if t_code:
+                    trans = GoogleTranslator(source='auto', target=t_code).translate(orig)
+                    final_text += f"{tm} {orig}\n Tarjima: {trans}\n\n"
+                else:
+                    final_text += f"{tm} {orig}\n\n"
+            
+            footer = (
+                f"\n---\n"
+                f"👤 Dasturchi: @Otavaliyev_M\n"
+                f"🚀 Powered by: Groq AI\n"
+                f"⏰ Vaqt: {get_uz_time()} (UZB)"
+            )
+            
+            site_link = f"{WEB_APP_URL}/?uid={chat_id}"
+            markup = types.InlineKeyboardMarkup()
+            markup.add(types.InlineKeyboardButton("✨ JONLI SUBTITEL (SAYT)", url=site_link))
+
+            if fmt == "txt":
+                with open("res.txt", "w", encoding="utf-8") as f: f.write(final_text + footer)
+                with open("res.txt", "rb") as f:
+                    bot.send_document(chat_id, f, caption=f"✅ Natija tayyor!\nFayl: {user_data[chat_id]['fname']}", reply_markup=markup)
+                os.remove("res.txt")
+            else:
+                if len(final_text + footer) > 4000:
+                    bot.send_message(chat_id, final_text[:4000] + "...")
+                    bot.send_message(chat_id, footer, reply_markup=markup)
+                else:
+                    bot.send_message(chat_id, final_text + footer, reply_markup=markup)
+
+            bot.delete_message(chat_id, wait_msg.message_id)
+            if os.path.exists(path): os.remove(path)
+            
+        except Exception as e:
+            bot.send_message(chat_id, f"❌ Xatolik yuz berdi: {e}")
+
+# Botni alohida oqimda ishga tushirish
+def run_polling():
+    bot.infinity_polling()
+
+if 'bot_thread' not in st.session_state:
+    st.session_state['bot_thread'] = True
+    threading.Thread(target=run_polling, daemon=True).start()
+
+st.markdown('<div style="position:fixed; bottom:0; right:0; padding:10px; color:lime;">● Bot Status: Active (Groq)</div>', unsafe_allow_html=True)
