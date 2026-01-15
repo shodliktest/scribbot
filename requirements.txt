@@ -1,0 +1,4 @@
+streamlit
+pyTelegramBotAPI
+openai-whisper
+pytz
