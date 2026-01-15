@@ -1,14 +1,14 @@
 import streamlit as st
 import telebot
 from telebot import types
-from groq import Groq  # Whisper o'rniga Groq
+from groq import Groq # Whisper o'rniga Groq
 import os
 import json
 import threading
 import pytz
-import time
 from datetime import datetime
 from deep_translator import GoogleTranslator
+import time
 
 # --- 1. SOZLAMALAR ---
 WEB_APP_URL = "https://shodlik1transcript.streamlit.app"
@@ -16,18 +16,18 @@ uz_tz = pytz.timezone('Asia/Tashkent')
 
 try:
     BOT_TOKEN = st.secrets["BOT_TOKEN"]
-    GROQ_API_KEY = st.secrets["GROQ_API_KEY"] # Groq kalitini olamiz
+    GROQ_API_KEY = st.secrets["GROQ_API_KEY"]
 except:
     st.error("❌ Secrets-da BOT_TOKEN yoki GROQ_API_KEY topilmadi!")
     st.stop()
 
-# Groq Clientni ishga tushiramiz
+# Groq Client
 client = Groq(api_key=GROQ_API_KEY)
 bot = telebot.TeleBot(BOT_TOKEN)
 
-# Streamlit interfeysi
+# Streamlit interfeysi (Server holati uchun)
 st.set_page_config(page_title="Bot Server", page_icon="🤖")
-st.title("🤖 Neon Karaoke Bot Server (Groq Edition)")
+st.title("🤖 Neon Karaoke Bot Server")
 st.success("Bot tizimi muvaffaqiyatli ishga tushdi!")
 st.info(f"Bot manzili: @{bot.get_me().username}")
 
@@ -53,9 +53,10 @@ def welcome(m):
         "👋 **Assalomu alaykum!**\n\n"
         "Men audio fayllarni matnga aylantirib beruvchi aqlli botman.\n\n"
         "**Imkoniyatlarim:**\n"
-        "✅ **Groq API** orqali o'ta tezkor transcription\n"
+        "✅ Audioni matnga aylantirish (Transcription)\n"
         "✅ Matnni boshqa tillarga tarjima qilish\n"
-        "✅ Saytda Neon Player orqali ko'rish\n\n"
+        "✅ Saytda Neon Player orqali ko'rish\n"
+        "✅ Har xil formatda natija olish\n\n"
         "🚀 Boshlash uchun menga **audio yoki ovozli xabar** yuboring!"
     )
     bot.send_message(m.chat.id, msg_text, parse_mode="Markdown", reply_markup=menu)
@@ -64,9 +65,10 @@ def welcome(m):
 def help_command(m):
     help_text = (
         "📖 **Botdan foydalanish qo'llanmasi:**\n\n"
-        "1️⃣ **Audio yuboring:** MP3 yoki Ovozli xabar.\n"
-        "2️⃣ **Tilni tanlang:** Avtomatik tarjima uchun.\n"
-        "3️⃣ **Formatni tanlang:** TXT yoki Chat xabari."
+        "1️⃣ **Audio yuboring:** MP3 yoki Ovozli xabar tashlang.\n"
+        "2️⃣ **Tilni tanlang:** Matn qaysi tilda chiqishini belgilang.\n"
+        "3️⃣ **Formatni tanlang:** Natijani fayl (TXT) yoki to'g'ridan-to'g'ri chatda xabar ko'rinishida oling.\n\n"
+        "✨ **Neon Sayt:** Har bir natija ostida 'Jonli Subtitel' tugmasi bo'ladi. Uni bossangiz, saytga o'tasiz va audioni so'zma-so'z neon effektida ko'rasiz."
     )
     bot.reply_to(m, help_text, parse_mode="Markdown")
 
@@ -75,7 +77,7 @@ def site_login(m):
     link = f"{WEB_APP_URL}/?uid={m.chat.id}"
     markup = types.InlineKeyboardMarkup()
     markup.add(types.InlineKeyboardButton("🚀 Neon Saytni Ochish", url=link))
-    bot.send_message(m.chat.id, "Shaxsiy havola:", reply_markup=markup)
+    bot.send_message(m.chat.id, "Sizning shaxsiy havolangiz orqali sayt sizni taniydi va natijalarni avtomatik yuboradi:", reply_markup=markup)
 
 @bot.message_handler(content_types=['audio', 'voice'])
 def audio_handler(m):
@@ -89,7 +91,7 @@ def audio_handler(m):
         types.InlineKeyboardButton("🇬🇧 Inglizcha", callback_data="lang_en")
     )
     
-    msg = bot.send_message(m.chat.id, "🛑 **DIQQAT:** Matn qaysi tilda chiqsin?", 
+    msg = bot.send_message(m.chat.id, "🛑 **DIQQAT:** Tilni tanlash orqali matn avtomatik tarjima qilinadi. Kerakli tilni tanlang:", 
                            parse_mode="Markdown", reply_markup=markup)
     user_data[m.chat.id]['m_ids'].append(msg.message_id)
     
@@ -110,7 +112,7 @@ def callback_query(call):
             types.InlineKeyboardButton("📁 TXT Fayl", callback_data="fmt_txt"),
             types.InlineKeyboardButton("💬 Chatda olish", callback_data="fmt_chat")
         )
-        msg = bot.edit_message_text("Formatni tanlang:", chat_id, call.message.message_id, reply_markup=markup)
+        msg = bot.edit_message_text("Qanday formatda olishni xohlaysiz?", chat_id, call.message.message_id, reply_markup=markup)
 
     elif call.data.startswith("fmt_"):
         fmt = call.data.replace("fmt_", "")
@@ -118,6 +120,8 @@ def callback_query(call):
         fid = user_data[chat_id]['fid']
         
         delete_user_messages(chat_id, user_data[chat_id]['m_ids'])
+        
+        # Groq API tezligi sababli xabarni biroz o'zgartirdik
         wait_msg = bot.send_message(chat_id, "⏳ **O'ta tezkor AI tahlil ketmoqda...**", parse_mode="Markdown")
         
         try:
@@ -126,18 +130,16 @@ def callback_query(call):
             path = f"tmp_{chat_id}.mp3"
             with open(path, "wb") as f: f.write(down)
             
-            # --- GROQ TAHLIL QISMI ---
+            # --- GROQ TAHLIL JARAYONI ---
             with open(path, "rb") as audio_file:
                 transcription = client.audio.transcriptions.create(
                     file=(path, audio_file.read()),
-                    model="whisper-large-v3-turbo", # Eng kuchli va tezkor model
+                    model="whisper-large-v3-turbo",
                     response_format="verbose_json",
                 )
             
             t_code = {"uz": "uz", "ru": "ru", "en": "en"}.get(lang)
             final_text = ""
-            
-            # Segments orqali vaqtli matnlarni olish
             for s in transcription.segments:
                 tm = f"[{int(s['start']//60):02d}:{int(s['start']%60):02d}]"
                 orig = s['text'].strip()
@@ -150,7 +152,7 @@ def callback_query(call):
             footer = (
                 f"\n---\n"
                 f"👤 Dasturchi: @Otavaliyev_M\n"
-                f"🚀 Powered by: Groq AI\n"
+                f"🤖 Bot: @{bot.get_me().username}\n"
                 f"⏰ Vaqt: {get_uz_time()} (UZB)"
             )
             
@@ -184,4 +186,4 @@ if 'bot_thread' not in st.session_state:
     st.session_state['bot_thread'] = True
     threading.Thread(target=run_polling, daemon=True).start()
 
-st.markdown('<div style="position:fixed; bottom:0; right:0; padding:10px; color:lime;">● Bot Status: Active (Groq)</div>', unsafe_allow_html=True)
+st.markdown('<div style="position:fixed; bottom:0; right:0; padding:10px; color:lime;">● Bot Status: Active (Groq API)</div>', unsafe_allow_html=True)
