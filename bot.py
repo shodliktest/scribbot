@@ -1,7 +1,7 @@
 import streamlit as st
 import telebot
 from telebot import types
-from groq import Groq # Whisper o'rniga Groq
+import whisper # Groq o'rniga Whisperga qaytdik
 import os
 import json
 import threading
@@ -16,13 +16,16 @@ uz_tz = pytz.timezone('Asia/Tashkent')
 
 try:
     BOT_TOKEN = st.secrets["BOT_TOKEN"]
-    GROQ_API_KEY = st.secrets["GROQ_API_KEY"]
 except:
-    st.error("❌ Secrets-da BOT_TOKEN yoki GROQ_API_KEY topilmadi!")
+    st.error("❌ Secrets-da BOT_TOKEN topilmadi!")
     st.stop()
 
-# Groq Client
-client = Groq(api_key=GROQ_API_KEY)
+# Mahalliy modelni yuklash (RAM uchun 'base' yoki 'tiny' tavsiya etiladi)
+@st.cache_resource
+def load_ai_model():
+    return whisper.load_model("base")
+
+model = load_ai_model()
 bot = telebot.TeleBot(BOT_TOKEN)
 
 # Streamlit interfeysi (Server holati uchun)
@@ -121,8 +124,7 @@ def callback_query(call):
         
         delete_user_messages(chat_id, user_data[chat_id]['m_ids'])
         
-        # Groq API tezligi sababli xabarni biroz o'zgartirdik
-        wait_msg = bot.send_message(chat_id, "⏳ **O'ta tezkor AI tahlil ketmoqda...**", parse_mode="Markdown")
+        wait_msg = bot.send_message(chat_id, "⏳ **Tahlil ketmoqda...**", parse_mode="Markdown")
         
         try:
             f_info = bot.get_file(fid)
@@ -130,17 +132,12 @@ def callback_query(call):
             path = f"tmp_{chat_id}.mp3"
             with open(path, "wb") as f: f.write(down)
             
-            # --- GROQ TAHLIL JARAYONI ---
-            with open(path, "rb") as audio_file:
-                transcription = client.audio.transcriptions.create(
-                    file=(path, audio_file.read()),
-                    model="whisper-large-v3-turbo",
-                    response_format="verbose_json",
-                )
+            # --- MAHALLIY WHISPER TAHLIL JARAYONI ---
+            result = model.transcribe(path)
             
             t_code = {"uz": "uz", "ru": "ru", "en": "en"}.get(lang)
             final_text = ""
-            for s in transcription.segments:
+            for s in result['segments']:
                 tm = f"[{int(s['start']//60):02d}:{int(s['start']%60):02d}]"
                 orig = s['text'].strip()
                 if t_code:
@@ -186,4 +183,4 @@ if 'bot_thread' not in st.session_state:
     st.session_state['bot_thread'] = True
     threading.Thread(target=run_polling, daemon=True).start()
 
-st.markdown('<div style="position:fixed; bottom:0; right:0; padding:10px; color:lime;">● Bot Status: Active (Groq API)</div>', unsafe_allow_html=True)
+st.markdown('<div style="position:fixed; bottom:0; right:0; padding:10px; color:lime;">● Bot Status: Active (Whisper Local)</div>', unsafe_allow_html=True)
