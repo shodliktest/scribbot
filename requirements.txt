@@ -1,7 +1,8 @@
 streamlit
 openai-whisper
 groq
-pyTelegramBotAPI
+aiogram
 deep_translator
 pytz
 torch
+
