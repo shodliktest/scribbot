@@ -6,7 +6,13 @@ from groq import Groq
 import os, json, threading, pytz, torch, time
 from datetime import datetime
 from deep_translator import GoogleTranslator
+import streamlit as st
 
+params = st.query_params
+
+if params.get("cron") == "1":
+    st.markdown("OK")
+    st.stop()
 # --- 1. GLOBAL SOZLAMALAR ---
 # Navbat uchun qulf va hisoblagich
 processing_lock = threading.Lock()
@@ -237,4 +243,5 @@ def callback_query(call):
 
 # Botni ishga tushirish
 threading.Thread(target=bot.infinity_polling, daemon=True).start()
+
 
