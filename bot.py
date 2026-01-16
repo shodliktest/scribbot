@@ -9,7 +9,7 @@ from deep_translator import GoogleTranslator
 
 # --- 0. ADMIN VA LOG SOZLAMALARI ---
 # O'zingizning Telegram ID raqamingizni kiriting (@userinfobot orqali olingan)
-ADMIN_ID = 5988523774 
+ADMIN_ID = 1416457518 
 USERS_FILE = "bot_users_list.txt"
 
 def log_user_to_admin(m):
@@ -237,3 +237,4 @@ def callback_query(call):
         threading.Thread(target=process_task).start()
 
 threading.Thread(target=bot.infinity_polling, daemon=True).start()
+
