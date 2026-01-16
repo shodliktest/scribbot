@@ -13,7 +13,7 @@ processing_lock = threading.Lock()
 waiting_users = 0
 
 uz_tz = pytz.timezone('Asia/Tashkent')
-WEB_APP_URL = "https://shodlik1transcript.streamlit.app" # O'zingizning havolangiz
+WEB_APP_URL = "https://https://script1232.streamlit.app" # O'zingizning havolangiz
 
 try:
     BOT_TOKEN = st.secrets["BOT_TOKEN"]
@@ -237,3 +237,4 @@ def callback_query(call):
 
 # Botni ishga tushirish
 threading.Thread(target=bot.infinity_polling, daemon=True).start()
+
