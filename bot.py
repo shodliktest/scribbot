@@ -15,9 +15,9 @@ SETTINGS_FILE = "bot_settings.json"
 uz_tz = pytz.timezone('Asia/Tashkent')
 
 def get_uz_time():
-    return datetime.now(uz_tz).strftime('%Y-%m-%d %H:%M:%S')
+    """O'zbekiston vaqtini olish"""
+    return datetime.now(uz_tz).strftime('%H:%M:%S')
 
-# Baza bilan ishlash funksiyalari
 def load_json(filename, default):
     if os.path.exists(filename):
         with open(filename, "r") as f: return json.load(f)
@@ -27,6 +27,7 @@ def save_json(filename, data):
     with open(filename, "w") as f: json.dump(data, f)
 
 def log_user_and_get_count(m):
+    """Foydalanuvchini ro'yxatga olish va tartib raqamini aniqlash"""
     uid = m.from_user.id
     user_list = []
     if os.path.exists(USERS_FILE):
@@ -36,12 +37,15 @@ def log_user_and_get_count(m):
     exists = any(str(uid) in line for line in user_list)
     if not exists:
         count = len(user_list) + 1
-        user_row = f"{count}. ID: {uid} | Name: {m.from_user.first_name} | User: @{m.from_user.username} | {get_uz_time()}\n"
+        user_row = f"{count}. ID: {uid} | Ism: {m.from_user.first_name} | User: @{m.from_user.username} | {get_uz_time()}\n"
         with open(USERS_FILE, "a", encoding="utf-8") as f: f.write(user_row)
         try:
             bot.send_message(ADMIN_ID, f"🆕 *YANGI FOYDALANUVCHI! (№{count})*\n👤 {m.from_user.first_name}\n🆔 `{uid}`", parse_mode="Markdown")
         except: pass
         return count
+    else:
+        for i, line in enumerate(user_list):
+            if str(uid) in line: return i + 1
     return len(user_list)
 
 # --- 1. GLOBAL KONFIGURATSIYA ---
@@ -57,7 +61,6 @@ except:
     st.stop()
 
 client_groq = Groq(api_key=GROQ_API_KEY)
-
 @st.cache_resource
 def load_local_whisper():
     return whisper.load_model("base")
@@ -65,12 +68,11 @@ def load_local_whisper():
 model_local = load_local_whisper()
 bot = telebot.TeleBot(BOT_TOKEN)
 
-# Bot holatini yuklash
+# Bot holati
 bot_config = load_json(SETTINGS_FILE, {"maintenance": False})
 banned_users = load_json(BAN_FILE, [])
 
 st.title("🤖 Neon Hybrid Ultimate Server")
-st.info(f"Bot Status: {'🔧 Texnik ishlar' if bot_config['maintenance'] else '✅ Faol'}")
 
 user_settings = {} 
 user_data = {}
@@ -86,6 +88,7 @@ def main_menu(uid):
 
 # --- 3. AQLLI TAHLIL (FAQAT GROQ UCHUN) ---
 def format_smart_context(text, lang_code=None):
+    """Matnni professional formatlash va tarjima qo'shish"""
     sentences = re.split(r'(?<=[.!?])\s+', text.strip())
     formatted_text = "📝 **AQLLI TAHLIL NATIJASI (GROQ MODE)**\n\n"
     
@@ -94,7 +97,7 @@ def format_smart_context(text, lang_code=None):
         if lang_code:
             try:
                 tr = GoogleTranslator(source='auto', target=lang_code).translate(sent)
-                sent = f"{sent} _({tr})_" # Italiyan (Italic) tarjima
+                sent = f"{sent} _({tr})_" # Italiyan (Italic) uslubda
             except: pass
         
         current_paragraph += sent + " "
@@ -106,63 +109,42 @@ def format_smart_context(text, lang_code=None):
         formatted_text += "    " + current_paragraph.strip()
     return formatted_text
 
-# --- 4. ADMIN FUNKSIYALARI ---
-def broadcast_message(message):
-    user_ids = []
-    if os.path.exists(USERS_FILE):
-        with open(USERS_FILE, "r") as f:
-            for line in f:
-                try: user_ids.append(line.split("|")[0].split(":")[1].strip())
-                except: pass
-    
-    success, fail = 0, 0
-    for uid in user_ids:
-        try:
-            bot.copy_message(uid, ADMIN_ID, message.message_id)
-            success += 1
-        except: fail += 1
-    return success, fail
-
-# --- 5. BOT MANTIQI ---
+# --- 4. BOT MANTIQI ---
 
 @bot.message_handler(commands=['start'])
 def welcome(m):
     if m.from_user.id in banned_users:
-        bot.send_message(m.chat.id, "🚫 Siz botdan foydalanishdan chetlatilgansiz.")
+        bot.send_message(m.chat.id, "🚫 Botdan foydalanish taqiqlangan.")
         return
-    
     if bot_config['maintenance'] and m.from_user.id != ADMIN_ID:
-        bot.send_message(m.chat.id, "🔧 Botda texnik ishlar ketmoqda. Tez orada qaytamiz!")
+        bot.send_message(m.chat.id, "🔧 Texnik ishlar ketmoqda...")
         return
 
     count = log_user_and_get_count(m)
     user_settings[m.chat.id] = user_settings.get(m.chat.id, "groq")
     msg = (f"👋 **Assalomu alaykum!**\n\nSiz botimizning **{count}-foydalanuvchisiz!**\n\n"
-           f"Hozirgi rejim: **{user_settings[m.chat.id].upper()}**")
+           f"Tanlangan rejim: **{user_settings[m.chat.id].upper()}**")
     bot.send_message(m.chat.id, msg, parse_mode="Markdown", reply_markup=main_menu(m.chat.id))
-
-# ADMIN PANEL HANDLERS
-@bot.message_handler(func=lambda m: m.text == "🔑 Admin Panel" and m.chat.id == ADMIN_ID)
-def admin_p(m):
-    markup = types.InlineKeyboardMarkup(row_width=2)
-    markup.add(
-        types.InlineKeyboardButton("📋 Ro'yxat", callback_data="adm_list"),
-        types.InlineKeyboardButton("🔄 Reboot", callback_data="adm_reboot"),
-        types.InlineKeyboardButton("📢 Xabar tarqatish", callback_data="adm_bc"),
-        types.InlineKeyboardButton("🔧 Texnik ishlar", callback_data="adm_maint"),
-        types.InlineKeyboardButton("📊 Stats", callback_data="adm_stats")
-    )
-    bot.send_message(ADMIN_ID, "🚀 **Admin boshqaruv paneli**\nBarcha tizimlar nazorat ostida.", reply_markup=markup, parse_mode="Markdown")
 
 @bot.message_handler(func=lambda m: m.text == "ℹ️ Yordam")
 def help_btn(m):
-    bot.send_message(m.chat.id, "📖 **Qo'llanma:**\n\n1. Audio yuboring.\n2. Tilni tanlang.\n3. Formatni (Split/Full) tanlang.")
+    bot.send_message(m.chat.id, "📖 **Qo'llanma:**\n\n1. Audio yuboring.\n2. Tilni tanlang.\n3. Formatni (Split/Full) tanlang.\n\n⚠️ Maks: 25MB.")
 
 @bot.message_handler(func=lambda m: m.text == "🌐 Saytga kirish (Login)")
 def login_btn(m):
     markup = types.InlineKeyboardMarkup()
     markup.add(types.InlineKeyboardButton("🚀 Saytga o'tish", url=WEB_APP_URL))
     bot.send_message(m.chat.id, "Neon Player uchun saytga kiring:", reply_markup=markup)
+
+@bot.message_handler(func=lambda m: m.text == "🔑 Admin Panel" and m.chat.id == ADMIN_ID)
+def admin_p(m):
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    markup.add(types.InlineKeyboardButton("📋 Ro'yxat", callback_data="adm_list"),
+               types.InlineKeyboardButton("🔄 Reboot", callback_data="adm_reboot"),
+               types.InlineKeyboardButton("📢 Xabar tarqatish", callback_data="adm_bc"),
+               types.InlineKeyboardButton("🔧 Texnik ishlar", callback_data="adm_maint"),
+               types.InlineKeyboardButton("📊 Stats", callback_data="adm_stats"))
+    bot.send_message(ADMIN_ID, "🚀 **Admin boshqaruv paneli**", reply_markup=markup)
 
 @bot.message_handler(func=lambda m: m.text in ["⚡ Groq Rejimi", "🎧 Whisper Rejimi"])
 def switch_m(m):
@@ -171,17 +153,14 @@ def switch_m(m):
 
 @bot.message_handler(content_types=['audio', 'voice'])
 def handle_audio(m):
-    if bot_config['maintenance'] and m.from_user.id != ADMIN_ID:
-        bot.send_message(m.chat.id, "🔧 Texnik ishlar tufayli audio qabul qilinmaydi.")
-        return
-
     f_size = m.audio.file_size if m.content_type == 'audio' else m.voice.file_size
     if f_size > 25 * 1024 * 1024:
         bot.send_message(m.chat.id, "❌ **Xato:** Fayl 25MB dan katta. Serverni himoya qilish uchun bunday fayllarni qabul qila olmayman.")
         return
-    
+    if f_size > 20 * 1024 * 1024:
+        bot.send_message(m.chat.id, "⚠️ **Ogohlantirish:** Fayl 20MB dan katta, tahlil biroz ko'proq vaqt olishi mumkin.")
+
     user_data[m.chat.id] = {'fid': m.audio.file_id if m.content_type == 'audio' else m.voice.file_id, 'fname': m.audio.file_name if m.content_type == 'audio' else "Ovozli.ogg"}
-    
     markup = types.InlineKeyboardMarkup(row_width=2)
     markup.add(types.InlineKeyboardButton("🇺🇿 O'zbek", callback_data="lang_uz"),
                types.InlineKeyboardButton("🇷🇺 Rus", callback_data="lang_ru"),
@@ -193,31 +172,26 @@ def calls(call):
     chat_id = call.message.chat.id
     global waiting_users, bot_config
 
+    # Admin Callbacklari
     if chat_id == ADMIN_ID:
         if call.data == "adm_reboot":
-            bot.send_message(ADMIN_ID, "🔄 Tizim qayta yuklanmoqda...")
-            os._exit(0)
-        
+            bot.send_message(ADMIN_ID, "🔄 Tizim qayta yuklanmoqda..."); os._exit(0)
         elif call.data == "adm_maint":
-            bot_config['maintenance'] = not bot_config['maintenance']
-            save_json(SETTINGS_FILE, bot_config)
-            bot.answer_callback_query(call.id, f"Texnik ishlar: {'Yoqildi' if bot_config['maintenance'] else 'Ochaqirildi'}")
+            bot_config['maintenance'] = not bot_config['maintenance']; save_json(SETTINGS_FILE, bot_config)
             bot.send_message(ADMIN_ID, f"🛠 Rejim: {'🔧 Texnik ishlar' if bot_config['maintenance'] else '✅ Faol'}")
-
         elif call.data == "adm_stats":
             count = 0
             if os.path.exists(USERS_FILE):
                 with open(USERS_FILE, "r") as f: count = len(f.readlines())
-            bot.send_message(ADMIN_ID, f"📊 **Statistika:**\n\nJami foydalanuvchilar: {count}\nStatus: {'🔧 Maint' if bot_config['maintenance'] else '✅ Live'}")
-
+            bot.send_message(ADMIN_ID, f"📊 Jami foydalanuvchilar: {count}")
         elif call.data == "adm_bc":
-            msg = bot.send_message(ADMIN_ID, "📢 Tarqatmoqchi bo'lgan xabaringizni yuboring (Text, Photo, Video):")
+            msg = bot.send_message(ADMIN_ID, "📢 Xabarni yuboring:")
             bot.register_next_step_handler(msg, process_broadcast)
-
         elif call.data == "adm_list":
             if os.path.exists(USERS_FILE):
                 with open(USERS_FILE, "rb") as f: bot.send_document(ADMIN_ID, f)
 
+    # Foydalanuvchi Callbacklari
     if call.data.startswith("lang_"):
         user_data[chat_id]['lang'] = call.data.replace("lang_", "")
         markup = types.InlineKeyboardMarkup(row_width=1)
@@ -302,9 +276,17 @@ def calls(call):
         threading.Thread(target=process).start()
 
 def process_broadcast(message):
-    bot.send_message(ADMIN_ID, "🚀 Tarqatish boshlandi...")
-    s, f = broadcast_message(message)
-    bot.send_message(ADMIN_ID, f"✅ Yakunlandi!\n\nYetkazildi: {s}\nXatolik: {f}")
+    user_ids = []
+    if os.path.exists(USERS_FILE):
+        with open(USERS_FILE, "r") as f:
+            for line in f:
+                try: user_ids.append(line.split("|")[0].split(":")[1].strip())
+                except: pass
+    s, f = 0, 0
+    for uid in user_ids:
+        try: bot.copy_message(uid, ADMIN_ID, message.message_id); s += 1
+        except: f += 1
+    bot.send_message(ADMIN_ID, f"✅ Yakunlandi! Yetkazildi: {s}, Xato: {f}")
 
 threading.Thread(target=bot.infinity_polling, daemon=True).start()
-            
+                
