@@ -205,7 +205,7 @@ def calls(call):
             if os.path.exists(USERS_FILE):
                 with open(USERS_FILE, "rb") as f: bot.send_document(ADMIN_ID, f)
 
-    # Foydalanuvchi Callbacklari
+  # Foydalanuvchi Callbacklari
     if call.data.startswith("lang_"):
         user_data[chat_id]['lang'] = call.data.replace("lang_", "")
         markup = types.InlineKeyboardMarkup(row_width=1)
@@ -221,6 +221,13 @@ def calls(call):
         bot.edit_message_text("💾 **Format: Malumotni qaysi kornishda olmoqchisiz?**", chat_id, call.message.message_id, reply_markup=markup)
 
     elif call.data.startswith("f_"):
+        # --- MANA SHU QISMI QO'SHILDI ---
+        try:
+            bot.delete_message(chat_id, call.message.message_id)
+        except:
+            pass
+        # --------------------------------
+        
         fmt = call.data.replace("f_", "")
         data = user_data[chat_id]
         mode = user_settings.get(chat_id, "groq")
@@ -329,4 +336,5 @@ if "bot_started" not in st.session_state:
     st.write("✅ Bot Polling ishga tushirildi.")
 
 st.write("Bot ishlamoqda... Audio yuborishni kuting.")
+
 
