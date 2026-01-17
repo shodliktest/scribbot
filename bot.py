@@ -121,8 +121,10 @@ def welcome(m):
         return
 
     count = log_user_and_get_count(m)
-    user_settings[m.chat.id] = user_settings.get(m.chat.id, "groq")
-     msg = (
+    current_mode = user_settings.get(m.chat.id, "groq")
+    mode_text = "⚡ Groq" if current_mode == "groq" else "🎧 Whisper"
+    
+    msg = (
         f"👋 **Assalomu alaykum!**\n\n"
         f"Siz botimizning **{count}-foydalanuvchisiz!**\n\n"
         "Men audio va ovozli xabarlarni matnga aylantirib beruvchi aqlli botman.\n\n"
@@ -132,7 +134,7 @@ def welcome(m):
         f"💡 Hozirgi rejim: **{mode_text}**\n\n"
         "Boshlash uchun audio yuboring!"
     )
-    bot.send_message(m.chat.id, msg, parse_mode="Markdown", reply_markup=main_menu_markup(m.chat.id))
+    bot.send_message(m.chat.id, msg, parse_mode="Markdown", reply_markup=main_menu(m.chat.id))
 
 @bot.message_handler(func=lambda m: m.text == "ℹ️ Yordam")
 def help_btn(m):
@@ -148,10 +150,10 @@ def login_btn(m):
 def admin_p(m):
     markup = types.InlineKeyboardMarkup(row_width=2)
     markup.add(types.InlineKeyboardButton("📋 Ro'yxat", callback_data="adm_list"),
-               types.InlineKeyboardButton("🔄 Reboot", callback_data="adm_reboot"),
-               types.InlineKeyboardButton("📢 Xabar tarqatish", callback_data="adm_bc"),
-               types.InlineKeyboardButton("🔧 Texnik ishlar", callback_data="adm_maint"),
-               types.InlineKeyboardButton("📊 Stats", callback_data="adm_stats"))
+                types.InlineKeyboardButton("🔄 Reboot", callback_data="adm_reboot"),
+                types.InlineKeyboardButton("📢 Xabar tarqatish", callback_data="adm_bc"),
+                types.InlineKeyboardButton("🔧 Texnik ishlar", callback_data="adm_maint"),
+                types.InlineKeyboardButton("📊 Stats", callback_data="adm_stats"))
     bot.send_message(ADMIN_ID, "🚀 **Admin boshqaruv paneli**", reply_markup=markup)
 
 @bot.message_handler(func=lambda m: m.text in ["⚡ Groq Rejimi", "🎧 Whisper Rejimi"])
@@ -170,14 +172,14 @@ def handle_audio(m):
 
     user_data[m.chat.id] = {'fid': m.audio.file_id if m.content_type == 'audio' else m.voice.file_id, 'fname': m.audio.file_name if m.content_type == 'audio' else "Ovozli.ogg"}
     markup = types.InlineKeyboardMarkup(row_width=2)
-   markup.add(
+    markup.add(
         types.InlineKeyboardButton("📄 Original", callback_data="lang_orig"),
         types.InlineKeyboardButton("🇺🇿 O'zbekcha", callback_data="lang_uz"),
         types.InlineKeyboardButton("🇷🇺 Ruscha", callback_data="lang_ru")
     )
-    mode = "⚡ Groq" if user_settings[m.chat.id] == "groq" else "🎧 Whisper"
+    current_mode = user_settings.get(m.chat.id, "groq")
+    mode = "⚡ Groq" if current_mode == "groq" else "🎧 Whisper"
     bot.send_message(m.chat.id, f"🎯 **Tanlangan rejim:** {mode}\n\n🌍 **Tarjima tilini tanlang:**\n(Til tanlansa, har bir gapdan so'ng qavs ichida tarjimasi qo'shiladi)", reply_markup=markup)
-    
 
 @bot.callback_query_handler(func=lambda call: True)
 def calls(call):
@@ -208,27 +210,26 @@ def calls(call):
         user_data[chat_id]['lang'] = call.data.replace("lang_", "")
         markup = types.InlineKeyboardMarkup(row_width=1)
         markup.add(types.InlineKeyboardButton("⏱ Split (Vaqt bilan)", callback_data="v_split"),
-                   types.InlineKeyboardButton("📖 Full Context (Groqda aqlli)", callback_data="v_full"))
+                    types.InlineKeyboardButton("📖 Full Context (Groqda aqlli)", callback_data="v_full"))
         bot.edit_message_text("📄 **Ko'rinish:**", chat_id, call.message.message_id, reply_markup=markup)
 
     elif call.data.startswith("v_"):
         user_data[chat_id]['view'] = call.data.replace("v_", "")
         markup = types.InlineKeyboardMarkup(row_width=2)
         markup.add(types.InlineKeyboardButton("📁 TXT Fayl", callback_data="f_txt"),
-                   types.InlineKeyboardButton("💬 Chat", callback_data="f_chat"))
+                    types.InlineKeyboardButton("💬 Chat", callback_data="f_chat"))
         bot.edit_message_text("💾 **Format: Malumotni qaysi kornishda olmoqchisiz?**", chat_id, call.message.message_id, reply_markup=markup)
 
     elif call.data.startswith("f_"):
         fmt = call.data.replace("f_", "")
         data = user_data[chat_id]
         mode = user_settings.get(chat_id, "groq")
-         waiting_users += 1
+        waiting_users += 1
         wait_msg = bot.send_message(chat_id, f"⏳ **Siz navbatdasiz.**\nSizdan oldin: {waiting_users-1} kishi bor.\nRejim: {mode.upper()}")
 
         def process_task():
             global waiting_users
             with processing_lock:
-                # Progress Bar funksiyasi
                 def update_progress(percent, status_text):
                     bar_len = 10
                     filled = int(percent / 10)
@@ -238,19 +239,13 @@ def calls(call):
                     except: pass
 
                 try:
-                    # Yuklab olish
-                    for p in range(0, 25, 5): 
-                        update_progress(p, "📥 Fayl serverga yuklanmoqda...")
-                        time.sleep(0.3)
-                        
+                    update_progress(10, "📥 Fayl serverga yuklanmoqda...")
                     f_info = bot.get_file(data['fid'])
                     down = bot.download_file(f_info.file_path)
                     path = f"tmp_{chat_id}.mp3"
                     with open(path, "wb") as f: f.write(down)
                     
-                    # Tahlil jarayoni
                     update_progress(30, "🧠 AI model ishga tushmoqda...")
-                    
                     segments = []
                     if mode == "groq":
                         try:
@@ -260,23 +255,17 @@ def calls(call):
                                 )
                             segments = res.segments
                         except:
-                            bot.send_message(chat_id, "⚠️ Groq API hozir charchagan. Iltimos birozdan so'ng urinib ko'ring yoki **Whisper Rejimi**ga o'ting!", reply_markup=main_menu_markup(chat_id))
+                            bot.send_message(chat_id, "⚠️ Groq API hozir charchagan. Iltimos birozdan so'ng urinib ko'ring yoki **Whisper Rejimi**ga o'ting!", reply_markup=main_menu(chat_id))
                             return
                     else:
-                        # Local Whisper
                         res = model_local.transcribe(path)
                         segments = res['segments']
 
-                    for p in range(40, 95, 10):
-                        update_progress(p, "✍️ Matn imlo qoidalari asosida yig'ilmoqda...")
-                        time.sleep(0.5)
-
-                    # Matnni shakllantirish
-                    lang_code = {"uz": "uz", "ru": "ru"}.get(data['lang'])
+                    update_progress(70, "✍️ Matn shakllantirilmoqda...")
+                    lang_code = data['lang'] if data['lang'] != "orig" else None
                     final_text = ""
                     
                     if data['view'] == "split":
-                        # Vaqt bo'yicha bo'lingan
                         for s in segments:
                             tm = f"[{int(s['start']//60):02d}:{int(s['start']%60):02d}]"
                             txt = s['text'].strip()
@@ -286,9 +275,7 @@ def calls(call):
                             else:
                                 final_text += f"{tm} {txt}\n\n"
                     else:
-                        # Butun yaxlit matn
                         raw_full = " ".join([s['text'].strip() for s in segments])
-                        # Gaplarga regex orqali bo'lish
                         sentences = re.split(r'(?<=[.!?])\s+', raw_full)
                         for sent in sentences:
                             if not sent: continue
@@ -300,40 +287,25 @@ def calls(call):
                         final_text = final_text.strip()
 
                     update_progress(100, "✅ Tahlil yakunlandi!")
-                    time.sleep(0.5)
-
-                    # Imzo (Signature)
-                    footer = (
-                        f"\n\n---\n"
-                        f"👤 Dasturchi: @Otavaliyev_M\n"
-                        f"🤖 Bot useri: @{bot.get_me().username}\n"
-                        f"⚙️ Rejim: {mode.upper()}\n"
-                        f"⏰ Vaqt: {get_uz_time()} (UZB)"
-                    )
+                    footer = f"\n\n---\n👤 Dasturchi: @Otavaliyev_M\n🤖 Bot: @{bot.get_me().username}\n⚙️ Rejim: {mode.upper()}\n⏰ Vaqt: {get_uz_time()}"
                     
                     if fmt == "txt":
-                        with open(f"res_{chat_id}.txt", "w", encoding="utf-8") as f: 
-                            f.write(final_text + footer)
-                        with open(f"res_{chat_id}.txt", "rb") as f:
-                            bot.send_document(chat_id, f, caption=f"Tayyor! \nBot: @{bot.get_me().username}")
+                        with open(f"res_{chat_id}.txt", "w", encoding="utf-8") as f: f.write(final_text + footer)
+                        with open(f"res_{chat_id}.txt", "rb") as f: bot.send_document(chat_id, f, caption="Natija tayyor!")
                         os.remove(f"res_{chat_id}.txt")
                     else:
-                        if len(final_text + footer) > 4000:
-                            bot.send_message(chat_id, (final_text + footer)[:4000])
-                            bot.send_message(chat_id, (final_text + footer)[4000:])
-                        else:
-                            bot.send_message(chat_id, final_text + footer)
+                        full_msg = final_text + footer
+                        if len(full_msg) > 4000:
+                            for x in range(0, len(full_msg), 4000): bot.send_message(chat_id, full_msg[x:x+4000])
+                        else: bot.send_message(chat_id, full_msg)
 
-                    # Avto tozalash
                     bot.delete_message(chat_id, wait_msg.message_id)
                     if os.path.exists(path): os.remove(path)
-
                 except Exception as e:
-                    bot.send_message(chat_id, f"❌ Xatolik: {e}\nIltimos, boshqa rejimni tanlab ko'ring.")
-                finally:
-                    waiting_users -= 1
+                    bot.send_message(chat_id, f"❌ Xatolik: {e}")
+                finally: waiting_users -= 1
 
-        threading.Thread(target=process).start()
+        threading.Thread(target=process_task).start()
 
 def process_broadcast(message):
     user_ids = []
@@ -348,4 +320,10 @@ def process_broadcast(message):
         except: f += 1
     bot.send_message(ADMIN_ID, f"✅ Yakunlandi! Yetkazildi: {s}, Xato: {f}")
 
-threading.Thread(target=bot.infinity_polling, daemon=True).start()
+# --- 5. STREAMLIT LIFECYCLE ---
+if "bot_started" not in st.session_state:
+    threading.Thread(target=bot.infinity_polling, daemon=True).start()
+    st.session_state["bot_started"] = True
+    st.write("✅ Bot Polling ishga tushirildi.")
+
+st.write("Bot ishlamoqda... Audio yuborishni kuting.")
