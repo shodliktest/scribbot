@@ -265,26 +265,28 @@ def calls(call):
                     lang_code = data['lang'] if data['lang'] != "orig" else None
                     final_text = ""
                     
+                   # --- SHU QISMNI ALMASHTIRING ---
                     if data['view'] == "split":
+                        # Har bir segment ichidagi gaplarni alohida qatorga chiqaramiz
                         for s in segments:
-                            tm = f"[{int(s['start']//60):02d}:{int(s['start']%60):02d}]"
-                            txt = s['text'].strip()
-                            if lang_code:
-                                tr = GoogleTranslator(source='auto', target=lang_code).translate(txt)
-                                final_text += f"{tm} {txt} ({tr})\n\n"
-                            else:
-                                final_text += f"{tm} {txt}\n\n"
-                    else:
-                        raw_full = " ".join([s['text'].strip() for s in segments])
-                        sentences = re.split(r'(?<=[.!?])\s+', raw_full)
-                        for sent in sentences:
-                            if not sent: continue
-                            if lang_code:
-                                tr = GoogleTranslator(source='auto', target=lang_code).translate(sent)
-                                final_text += f"{sent} ({tr}) "
-                            else:
-                                final_text += f"{sent} "
-                        final_text = final_text.strip()
+                            start_time = s['start']
+                            # Regex yordamida segmentni gaplarga ajratamiz (., !, ? dan keyin)
+                            sub_sentences = re.split(r'(?<=[.!?])\s+', s['text'].strip())
+                            
+                            for sub in sub_sentences:
+                                if not sub: continue
+                                tm = f"[{int(start_time//60):02d}:{int(start_time%60):02d}]"
+                                
+                                if lang_code:
+                                    try:
+                                        # Har bir kichik gapni alohida tarjima qilamiz
+                                        tr = GoogleTranslator(source='auto', target=lang_code).translate(sub)
+                                        final_text += f"{tm} {sub}\n_({tr})_\n\n"
+                                    except:
+                                        final_text += f"{tm} {sub}\n\n"
+                                else:
+                                    final_text += f"{tm} {sub}\n\n"
+                    # --- ALMASHTIRISH SHU YERDA TUGAYDI ---
 
                     update_progress(100, "✅ Tahlil yakunlandi!")
                     footer = f"\n\n---\n👤 Dasturchi: @Otavaliyev_M\n🤖 Bot: @{bot.get_me().username}\n⚙️ Rejim: {mode.upper()}\n⏰ Vaqt: {get_uz_time()}"
@@ -327,3 +329,4 @@ if "bot_started" not in st.session_state:
     st.write("✅ Bot Polling ishga tushirildi.")
 
 st.write("Bot ishlamoqda... Audio yuborishni kuting.")
+
