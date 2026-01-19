@@ -233,15 +233,40 @@ def callback_query(call):
                     gc.collect() # RAMni bo'shatish
 
         threading.Thread(target=process_task).start()
-
-# --- SINGLETON POLLING (CONFLICT 409 FIX) ---
+# --- SINGLETON POLLING (BREAK INFINITY POLLING FIX) ---
 @st.cache_resource
 def start_bot_singleton():
-    try: bot.stop_polling()
-    except: pass
-    thread = threading.Thread(target=bot.infinity_polling, kwargs={'timeout': 20, 'long_polling_timeout': 10}, daemon=True)
+    """Botni uzilishlarsiz va xatolarsiz qayta ishga tushirish"""
+    try:
+        # Eski ulanishlarni tozalash
+        bot.stop_polling()
+        time.sleep(1)
+    except:
+        pass
+
+    def run_polling():
+        while True:
+            try:
+                # infinity_polling ichidagi muhim parametrlar:
+                # timeout: serverdan javob kutish vaqti
+                # long_polling_timeout: ulanishni ochiq ushlab turish vaqti
+                # skip_pending: bot o'chiq bo'lgan vaqtda kelgan eski xabarlarni o'tkazib yuborish
+                bot.infinity_polling(
+                    timeout=20, 
+                    long_polling_timeout=10, 
+                    logger_level=5, # Xatoliklarni log qilish
+                    skip_pending=True
+                )
+            except Exception as e:
+                # Agar polling buzilsa, 5 soniya kutib qayta ishga tushadi
+                st.error(f"Bot pollingda uzilish: {e}")
+                time.sleep(5)
+
+    thread = threading.Thread(target=run_polling, daemon=True)
     thread.start()
     return True
 
+# Botni ishga tushirish
 start_bot_singleton()
                                                                                                                                                                          
+
