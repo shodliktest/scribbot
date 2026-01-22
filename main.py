@@ -5,268 +5,175 @@ import os
 import io
 import time
 import sqlite3
+import pytz
+import pandas as pd
 import numpy as np
 import cv2
 import pytesseract
 import img2pdf
 from PIL import Image, ImageEnhance
+from datetime import datetime
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.types import BufferedInputFile, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.client.default import DefaultBotProperties
 
-# --- 1. SOZLAMALAR VA XAVFSIZLIK ---
-st.set_page_config(page_title="Admin Panel", layout="wide", page_icon="🛡")
+# --- 1. SOZLAMALAR ---
+st.set_page_config(page_title="AI Studio Admin", layout="wide", page_icon="🛡")
 
 try:
     BOT_TOKEN = st.secrets["telegram"]["BOT_TOKEN"]
     ADMIN_ID = int(st.secrets["telegram"]["ADMIN_ID"])
     ADMIN_PASS = st.secrets["telegram"]["ADMIN_PASSWORD"]
 except:
-    st.error("❌ `.streamlit/secrets.toml` fayli noto'g'ri yoki mavjud emas!")
+    st.error("❌ Secrets sozlanmagan! Streamlit Cloud -> Settings -> Secrets qismini tekshiring.")
     st.stop()
 
-DB_FILE = "bot_database.db"
+DB_FILE = "bot_data.db"
+uz_tz = pytz.timezone('Asia/Tashkent')
 
-# --- 2. BAZA BILAN ISHLASH (Admin Broadcast uchun) ---
+# --- 2. BAZA (SQLite) ---
+@st.cache_resource
+def get_db_conn():
+    return sqlite3.connect(DB_FILE, check_same_thread=False)
+
 def init_db():
-    with sqlite3.connect(DB_FILE, check_same_thread=False) as conn:
-        conn.execute("CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY, username TEXT)")
+    conn = get_db_conn()
+    conn.execute("CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY, username TEXT, join_date TEXT)")
+    conn.commit()
 
-def add_user(user_id, username):
-    with sqlite3.connect(DB_FILE, check_same_thread=False) as conn:
-        conn.execute("INSERT OR IGNORE INTO users VALUES (?, ?)", (user_id, username))
+def add_user(uid, uname):
+    conn = get_db_conn()
+    now = datetime.now(uz_tz).strftime("%Y-%m-%d %H:%M")
+    conn.execute("INSERT OR IGNORE INTO users VALUES (?, ?, ?)", (uid, uname, now))
+    conn.commit()
 
-def get_all_users():
-    with sqlite3.connect(DB_FILE, check_same_thread=False) as conn:
-        return [row[0] for row in conn.execute("SELECT user_id FROM users")]
-
-# --- 3. TASVIRNI QAYTA ISHLASH (CORE) ---
-def process_image_logic(img_bytes, action):
-    # Baytlarni OpenCV formatiga o'tkazish
+# --- 3. CORE LOGIC (Rasmga ishlov berish) ---
+def process_media(img_bytes, action):
     nparr = np.frombuffer(img_bytes, np.uint8)
     img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
     
     if action == "enhance":
-        # Sifatni oshirish
         pil_img = Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
         enhancer = ImageEnhance.Contrast(pil_img)
-        pil_img = enhancer.enhance(1.5)
-        sharp = ImageEnhance.Sharpness(pil_img)
-        return "image", sharp.enhance(1.3)
+        return "image", enhancer.enhance(1.5)
 
     elif action == "ocr":
-        # Matn o'qish (OCR)
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        # Shovqinni tozalash
-        gray = cv2.medianBlur(gray, 3)
-        text = pytesseract.image_to_string(gray, lang='uzb+eng+rus')
-        return "text", text if text.strip() else "❌ Matnni aniqlab bo'lmadi."
+        text = pytesseract.image_to_string(gray, lang='uzb+rus+eng')
+        return "text", text if text.strip() else "❌ Matn topilmadi."
 
     elif action == "pdf":
-        # Hujjat Skaneri (Adaptive Threshold)
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        # Hujjat effekti berish (oq-qora toza skan)
         scanned = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2)
         pil_scanned = Image.fromarray(scanned)
-        
-        # PDF ga aylantirish uchun JPEG ga o'tkazish
         img_io = io.BytesIO()
-        pil_scanned.save(img_io, format="JPEG", quality=90)
-        pdf_bytes = img2pdf.convert(img_io.getvalue())
-        
-        pdf_io = io.BytesIO(pdf_bytes)
-        return "pdf", pdf_io
+        pil_scanned.save(img_io, format="JPEG")
+        pdf_data = img2pdf.convert(img_io.getvalue())
+        return "pdf", io.BytesIO(pdf_data)
 
     elif action == "sketch":
-        # Style Transfer (Qalamda chizilgan effekt)
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         inv = 255 - gray
         blur = cv2.GaussianBlur(inv, (21, 21), 0)
         sketch = cv2.divide(gray, 255 - blur, scale=256)
         return "image", Image.fromarray(sketch)
 
-    elif action == "cartoon":
-        # Style Transfer (Multfilm effekti)
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        gray = cv2.medianBlur(gray, 5)
-        edges = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY, 9, 9)
-        color = cv2.bilateralFilter(img, 9, 250, 250)
-        cartoon = cv2.bitwise_and(color, color, mask=edges)
-        return "image", Image.fromarray(cv2.cvtColor(cartoon, cv2.COLOR_BGR2RGB))
-
-# --- 4. TELEGRAM BOT (HANDLERS) ---
+# --- 4. TELEGRAM BOT (Asosiy Protsess) ---
 @st.cache_resource
-def get_bot_instance():
-    """Singleton Bot Instance"""
+def get_bot():
     return Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
 
-bot = get_bot_instance()
+bot = get_bot()
 dp = Dispatcher()
 init_db()
 
 @dp.message(Command("start"))
-async def start_cmd(m: types.Message):
+async def cmd_start(m: types.Message):
     add_user(m.from_user.id, m.from_user.username)
-    await m.answer(f"👋 Salom <b>{m.from_user.full_name}</b>!\n\n📸 Rasm yuboring, men uni professional darajada tahrirlab beraman.")
+    await m.answer(f"👋 Salom <b>{m.from_user.full_name}</b>!\nRasm yuboring, men uni professional tahrirlayman.")
 
 @dp.message(F.photo)
-async def photo_processing(m: types.Message):
-    # DEFENDER: 25MB Limit
-    file_size = m.photo[-1].file_size
-    if file_size > 25 * 1024 * 1024:
-        await m.answer("❌ <b>Xatolik:</b> Fayl hajmi 25MB dan katta!")
+async def handle_photo(m: types.Message):
+    if m.photo[-1].file_size > 25 * 1024 * 1024:
+        await m.answer("❌ Fayl 25MB dan katta!")
         return
-
-    # Menyular
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✨ Sifatni oshirish", callback_data="do_enhance"),
-         InlineKeyboardButton(text="📝 OCR (Matn)", callback_data="do_ocr")],
-        [InlineKeyboardButton(text="📄 PDF Skaner", callback_data="do_pdf"),
-         InlineKeyboardButton(text="✏️ Sketch", callback_data="do_sketch")],
-        [InlineKeyboardButton(text="🎨 Cartoon", callback_data="do_cartoon")]
+        [InlineKeyboardButton(text="✨ Enhance", callback_data="do_enhance"), InlineKeyboardButton(text="📝 OCR", callback_data="do_ocr")],
+        [InlineKeyboardButton(text="📄 PDF Scan", callback_data="do_pdf"), InlineKeyboardButton(text="🎨 Sketch", callback_data="do_sketch")]
     ])
-    await m.reply("👇 Kerakli xizmatni tanlang:", reply_markup=kb)
+    await m.reply("Tanlang:", reply_markup=kb)
 
 @dp.callback_query(F.data.startswith("do_"))
-async def callback_worker(call: types.CallbackQuery):
+async def callback_handler(call: types.CallbackQuery):
     action = call.data.split("_")[1]
     msg = call.message
-    photo = msg.reply_to_message.photo[-1]
-
-    # Progress Bar Funksiyasi
-    async def update_progress(text, percent):
-        bar_len = 10
-        filled = int(bar_len * percent / 100)
-        bar = "█" * filled + "░" * (bar_len - filled)
-        try:
-            await status_msg.edit_text(f"{text}\n`[{bar}] {percent}%`", parse_mode="Markdown")
-        except: pass
-
-    status_msg = await msg.answer("⏳ <b>Ulanmoqda...</b>")
+    status = await msg.answer("⏳ Bajarilmoqda... `[░░░░░░░░░░] 0%`", parse_mode="Markdown")
     
     try:
-        # 1. Yuklab olish
-        await update_progress("📥 Rasm yuklanmoqda...", 20)
-        file_info = await bot.get_file(photo.file_id)
-        downloaded = await bot.download_file(file_info.file_path)
-        img_bytes = downloaded.read()
-
-        # 2. Qayta ishlash
-        await update_progress("⚙️ AI ishlamoqda...", 60)
-        # CPU ishlashini bloklamaslik uchun Executor ishlatamiz
-        loop = asyncio.get_event_loop()
-        res_type, result = await loop.run_in_executor(None, process_image_logic, img_bytes, action)
-
-        # 3. Yuborish
-        await update_progress("📤 Natija yuklanmoqda...", 90)
+        file = await bot.get_file(msg.reply_to_message.photo[-1].file_id)
+        down = await bot.download_file(file.file_path)
+        img_bytes = down.read()
         
+        await status.edit_text("⚙️ AI ishlamoqda... `[██████░░░░] 60%`", parse_mode="Markdown")
+        
+        loop = asyncio.get_event_loop()
+        res_type, res = await loop.run_in_executor(None, process_media, img_bytes, action)
+        
+        await status.edit_text("📤 Yuborilmoqda... `[██████████] 100%`", parse_mode="Markdown")
+
         if res_type == "image":
             buf = io.BytesIO()
-            result.save(buf, format="JPEG", quality=95)
-            buf.seek(0)
-            await msg.answer_photo(BufferedInputFile(buf.read(), filename="edit.jpg"), caption="✅ <b>Tayyor!</b>")
-        
+            res.save(buf, format="JPEG")
+            await msg.answer_photo(BufferedInputFile(buf.getvalue(), filename="res.jpg"))
         elif res_type == "text":
-            if len(result) > 4000:
-                # Agar matn uzun bo'lsa fayl qilamiz
-                buf = io.BytesIO(result.encode())
-                await msg.answer_document(BufferedInputFile(buf.read(), filename="ocr_text.txt"), caption="✅ <b>Matn faylda!</b>")
-            else:
-                await msg.answer(f"📝 <b>Natija:</b>\n\n{result}")
-        
+            await msg.answer(f"📝 <b>Natija:</b>\n\n<code>{res}</code>")
         elif res_type == "pdf":
-            result.seek(0)
-            await msg.answer_document(BufferedInputFile(result.read(), filename="hujjat.pdf"), caption="✅ <b>Professional Scan (PDF)</b>")
-
-        await status_msg.delete()
-
+            await msg.answer_document(BufferedInputFile(res.read(), filename="scan.pdf"))
+        
+        await status.delete()
     except Exception as e:
-        await status_msg.edit_text(f"❌ <b>Xatolik:</b> {str(e)}")
+        await status.edit_text(f"❌ Xato: {str(e)}")
 
-# --- 5. BACKGROUND THREAD MANAGER (Killer Webhook) ---
-def run_bot_in_background():
-    """Botni alohida oqimda, xavfsiz ishga tushirish"""
-    async def runner():
-        # Webhookni o'ldirish (Pending update'larni tozalash)
-        await bot.delete_webhook(drop_pending_updates=True)
-        try:
-            await dp.start_polling(bot)
-        except Exception as e:
-            print(f"Bot Polling Error: {e}")
-
-    # Yangi Loop yaratish (Streamlit Loop bilan konflikt bo'lmasligi uchun)
+# --- 5. SINGLETON RUNNER (Qotib qolmaslik himoyasi) ---
+def run_bot():
     new_loop = asyncio.new_event_loop()
     asyncio.set_event_loop(new_loop)
-    new_loop.run_until_complete(runner())
+    async def start():
+        await bot.delete_webhook(drop_pending_updates=True)
+        await dp.start_polling(bot, handle_signals=False)
+    new_loop.run_until_complete(start())
 
-# Singleton Thread Check
-if "bot_active" not in st.session_state:
-    thread_exists = False
-    for t in threading.enumerate():
-        if t.name == "SecureBotThread":
-            thread_exists = True
-            break
-    
-    if not thread_exists:
-        t = threading.Thread(target=run_bot_in_background, name="SecureBotThread", daemon=True)
-        t.start()
-    st.session_state.bot_active = True
+if "bot_online" not in st.session_state:
+    if not any(t.name == "BotThread" for t in threading.enumerate()):
+        threading.Thread(target=run_bot, name="BotThread", daemon=True).start()
+    st.session_state.bot_online = True
 
-# --- 6. ADMIN PANEL (STREAMLIT UI) ---
-st.sidebar.title("🔐 Admin Login")
-password = st.sidebar.text_input("Parol", type="password")
+# --- 6. ADMIN PANEL (WEB) ---
+st.title("🔐 AI Studio Admin Panel")
+conn = get_db_conn()
+df = pd.read_sql_query("SELECT * FROM users", conn)
 
-if password == ADMIN_PASS:
-    st.title("🎛 Admin Boshqaruv Paneli")
-    
-    # Statistika
-    users = get_all_users()
-    col1, col2, col3 = st.columns(3)
-    col1.metric("Jami Foydalanuvchilar", len(users))
-    col2.metric("Bot Holati", "🟢 Aktiv")
-    col3.metric("Server Threadlar", threading.active_count())
-    
-    st.divider()
-    
-    # Saytga kirish tugmasi (Simulyatsiya)
-    st.markdown("### 🌐 Sayt boshqaruvi")
-    if st.button("🔗 Admin Panelni Yangilash (Refresh Site)"):
-        st.rerun()
+st.metric("Jami foydalanuvchilar", len(df))
+tab1, tab2 = st.tabs(["📢 Broadcast", "📋 Foydalanuvchilar"])
 
-    # Broadcast (Xabar tarqatish)
-    st.markdown("### 📢 Xabar Tarqatish")
-    msg_text = st.text_area("Xabar matnini kiriting:", height=100)
-    
-    if st.button("🚀 Hammaga Yuborish"):
-        if not msg_text:
-            st.warning("Matn yozilmadi!")
-        else:
-            progress = st.progress(0)
-            status_txt = st.empty()
-            
-            # Asinxron yuborish funksiyasi
-            async def send_broadcast():
-                count = 0
-                for i, uid in enumerate(users):
-                    try:
-                        await bot.send_message(uid, msg_text)
-                        count += 1
-                    except: pass
-                    # Progress barni yangilash
-                    percent = int((i + 1) / len(users) * 100)
-                    progress.progress(percent)
-                    status_txt.text(f"Yuborilmoqda: {i+1}/{len(users)}")
-                return count
+with tab1:
+    auth = st.text_input("Parol:", type="password")
+    if auth == ADMIN_PASS:
+        txt = st.text_area("Xabar:")
+        if st.button("🚀 Hammaga yuborish"):
+            stats = {"s": 0, "f": 0}
+            async def do_bc():
+                temp_bot = Bot(token=BOT_TOKEN)
+                for uid in df['user_id']:
+                    try: 
+                        await temp_bot.send_message(uid, txt)
+                        stats["s"] += 1
+                    except: stats["f"] += 1
+                await temp_bot.session.close()
+            asyncio.run(do_bc())
+            st.success(f"Yuborildi: {stats['s']}, Xato: {stats['f']}")
+    else: st.warning("Parol kiritilmadi.")
 
-            # Streamlit ichida async ishlatish
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            sent_count = loop.run_until_complete(send_broadcast())
-            
-            st.success(f"✅ Xabar {sent_count} kishiga yuborildi!")
-
-else:
-    st.title("🤖 AI Bot Server")
-    st.info("Bot orqa fonda ishlamoqda. Admin panelga kirish uchun parolni kiriting.")
-    
+with tab2:
+    st.dataframe(df, use_container_width=True)
