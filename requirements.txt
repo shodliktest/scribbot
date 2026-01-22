@@ -1,10 +1,11 @@
 streamlit
 aiogram>=3.0.0
+Pillow
 numpy
 opencv-python-headless
-img2pdf
-Pillow
 pytesseract
+img2pdf
 python-docx
 pdf2docx
+pypdf2
 pytz
