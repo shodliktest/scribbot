@@ -7,5 +7,6 @@ pytesseract
 img2pdf
 python-docx
 pdf2docx
-pypdf2
-pytz
+PyPDF2
+reportlab
+pandas
