@@ -1,7 +1,7 @@
 streamlit
-openai-whisper
-groq
-pyTelegramBotAPI
-deep_translator
-pytz
-torch
+aiogram>=3.0.0
+Pillow
+numpy
+opencv-python-headless
+pytesseract
+img2pdf
