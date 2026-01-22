@@ -9,6 +9,7 @@ import cv2
 import numpy as np
 import pytesseract
 import img2pdf
+import html  # <--- Xatolikni tuzatish uchun muhim kutubxona
 from PIL import Image, ImageEnhance
 from docx import Document
 from docx.shared import Inches
@@ -25,13 +26,13 @@ import pandas as pd
 if "GLOBAL_DATA" not in globals():
     GLOBAL_DATA = {} 
 
-# --- 2. PREMIUM DIZAYN (WEB SAYT) ---
+# --- 2. PREMIUM DIZAYN ---
 st.set_page_config(page_title="AI Studio Pro 2026", layout="wide", page_icon="💎")
 
 st.markdown("""
     <style>
     .main { background-color: #0e1117; }
-    .stMetric { background-color: #161b22; border: 1px solid #30363d; border-radius: 12px; padding: 15px; box-shadow: 0 4px 6px rgba(0,0,0,0.3); }
+    .stMetric { background-color: #161b22; border: 1px solid #30363d; border-radius: 12px; padding: 15px; }
     .info-box { background: #0d1117; border-left: 5px solid #1f6feb; padding: 20px; border-radius: 8px; margin-bottom: 20px; }
     .header-text { color: #58a6ff; font-size: 40px; font-weight: bold; text-align: center; }
     </style>
@@ -45,31 +46,21 @@ except:
     st.error("❌ Secrets fayli sozlanmagan!")
     st.stop()
 
-# --- 3. OG'IR FUNKSIYALAR (LOGIKA) ---
+# --- 3. KUCHAYTIRILGAN FUNKSIYALAR ---
 
 def convert_pdf_to_docx_safe(pdf_bytes):
-    """PDF ni Word ga o'tkazish (Temp File orqali - 100% ishonchli)"""
-    # Vaqtinchalik fayl yaratamiz
     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tf_in:
         tf_in.write(pdf_bytes)
         temp_pdf = tf_in.name
-    
     temp_docx = temp_pdf.replace(".pdf", ".docx")
-    
     try:
-        # Konvertatsiya
         cv = Converter(temp_pdf)
         cv.convert(temp_docx, start=0, end=None)
         cv.close()
-        
-        # Natijani o'qib olamiz
-        with open(temp_docx, "rb") as f:
-            docx_bytes = f.read()
+        with open(temp_docx, "rb") as f: docx_bytes = f.read()
         return docx_bytes
-    except Exception as e:
-        return None
+    except: return None
     finally:
-        # Fayllarni tozalaymiz (Muhim!)
         if os.path.exists(temp_pdf): os.remove(temp_pdf)
         if os.path.exists(temp_docx): os.remove(temp_docx)
 
@@ -101,12 +92,35 @@ def images_to_docx(image_list):
     doc.save(buf)
     return buf.getvalue()
 
-def ocr_process(image_list):
+# --- 🔴 ENG KUCHLI OCR REJIMI 🔴 ---
+
+def ocr_process_pro(image_list):
     full_text = ""
-    for img in image_list:
-        pil_img = Image.open(io.BytesIO(img))
-        text = pytesseract.image_to_string(pil_img, lang='uzb+rus+eng')
+    # Tesseract konfiguratsiyasi (Neural Network + Auto Page Segmentation)
+    custom_config = r'--oem 3 --psm 6' 
+    
+    for img_bytes in image_list:
+        # 1. Rasmni o'qish
+        nparr = np.frombuffer(img_bytes, np.uint8)
+        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        
+        # 2. Kattalashtirish (Upscaling) - mayda harflar uchun
+        img = cv2.resize(img, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
+        
+        # 3. Oq-qora qilish (Grayscale)
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        
+        # 4. Shovqinni tozalash va Binarizatsiya (Thresholding)
+        # Bu rasmni faqat qora va oq rangda qoldiradi, OCR uchun ideal
+        thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
+        
+        # 5. PIL formatga o'tkazish
+        pil_img = Image.fromarray(thresh)
+        
+        # 6. Matnni o'qish
+        text = pytesseract.image_to_string(pil_img, lang='uzb+rus+eng', config=custom_config)
         full_text += text + "\n\n----------------\n\n"
+        
     return full_text
 
 # --- 4. BOT SETUP ---
@@ -117,7 +131,7 @@ def get_bot():
 bot = get_bot()
 dp = Dispatcher()
 
-# --- 5. MENYU VA INFO ---
+# --- 5. MENYU ---
 def get_main_kb(user_id):
     kb = [[KeyboardButton(text="ℹ️ Info"), KeyboardButton(text="👨‍💻 Adminga murojaat")]]
     if str(user_id) == ADMIN_ID:
@@ -130,7 +144,7 @@ INFO_TEXT = """
 📸 <b>Rasm yuborsangiz:</b>
 • <b>📄 PDF Skaner:</b> Rasmlarni bitta PDF kitob qiladi.
 • <b>📝 Word (DOCX):</b> Rasmlarni Word hujjatiga joylaydi.
-• <b>🔍 OCR (Matn):</b> Rasmdan yozuvni ajratib oladi.
+• <b>🔍 OCR (Matn):</b> Rasmdan yozuvni (PRO rejimda) ajratib oladi.
 • <b>✨ AI Tiniqlash:</b> Xira rasmlarni tozalaydi.
 
 📄 <b>PDF yuborsangiz:</b>
@@ -153,36 +167,34 @@ async def text_router(m: types.Message):
     text = m.text
     state = GLOBAL_DATA.get(uid, {}).get('state')
 
-    # ADMIN REPLY (JAVOB BERISH)
+    # ADMIN REPLY
     if str(uid) == ADMIN_ID and m.reply_to_message:
         replied_text = m.reply_to_message.text or m.reply_to_message.caption or ""
         match = re.search(r"#ID(\d+)", replied_text)
         if match:
             target_id = match.group(1)
             try:
-                await bot.send_message(target_id, f"👨‍💻 <b>Admin javobi:</b>\n\n{text}")
+                # Xatolikni oldini olish uchun html.escape ishlatamiz
+                safe_text = html.escape(text)
+                await bot.send_message(target_id, f"👨‍💻 <b>Admin javobi:</b>\n\n{safe_text}")
                 await m.answer(f"✅ Javob yuborildi.")
             except: await m.answer("❌ Foydalanuvchi bloklagan.")
         else: await m.answer("❌ #ID topilmadi.")
         return
 
-    # PDF SPLIT INPUT
+    # PDF SPLIT
     if state == "waiting_split":
         try:
             start, end = map(int, text.split("-"))
             pdf_content = GLOBAL_DATA[uid]['doc_content']
             loop = asyncio.get_event_loop()
-            
-            # Progress Simulyatsiyasi
             status = await m.answer("⏳ <b>PDF kesilmoqda...</b>")
-            
             def split_sync():
                 reader = PdfReader(io.BytesIO(pdf_content))
                 writer = PdfWriter()
                 for i in range(start-1, min(end, len(reader.pages))):
                     writer.add_page(reader.pages[i])
                 out = io.BytesIO(); writer.write(out); return out.getvalue()
-
             pdf_out = await loop.run_in_executor(None, split_sync)
             await status.delete()
             await m.answer_document(BufferedInputFile(pdf_out, filename="kesilgan.pdf"), caption="✅ Tayyor!")
@@ -192,7 +204,8 @@ async def text_router(m: types.Message):
 
     # MUROJAAT
     if state == "waiting_contact":
-        msg = f"📩 <b>YANGI XABAR!</b>\n👤: {m.from_user.full_name}\n🆔: #ID{uid}\n\n📝: {text}"
+        safe_msg = html.escape(text) # Xavfsiz matn
+        msg = f"📩 <b>YANGI XABAR!</b>\n👤: {m.from_user.full_name}\n🆔: #ID{uid}\n\n📝: {safe_msg}"
         await bot.send_message(ADMIN_ID, msg)
         await m.answer("✅ Adminga yuborildi.", reply_markup=get_main_kb(uid))
         GLOBAL_DATA[uid]['state'] = None
@@ -207,7 +220,7 @@ async def text_router(m: types.Message):
 @dp.message(F.photo)
 async def handle_photo(m: types.Message):
     uid = m.from_user.id
-    if GLOBAL_DATA.get(uid, {}).get('state') == "waiting_contact": # Murojaat rasm
+    if GLOBAL_DATA.get(uid, {}).get('state') == "waiting_contact":
         await bot.send_message(ADMIN_ID, f"📩 <b>Rasm</b> (#ID{uid}):")
         await m.send_copy(ADMIN_ID); await m.answer("✅ Yuborildi.", reply_markup=get_main_kb(uid))
         GLOBAL_DATA[uid]['state'] = None; return
@@ -243,7 +256,7 @@ async def handle_docs(m: types.Message):
         kb = [[InlineKeyboardButton(text="📄 PDFga o'tkazish", callback_data="doc_to_pdf")]]
     await m.reply("📂 Fayl menyusi:", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
 
-# --- CALLBACKS (PROGRESS BAR BILAN) ---
+# --- CALLBACKS ---
 @dp.callback_query(F.data)
 async def callback_worker(call: types.CallbackQuery):
     uid = call.from_user.id
@@ -270,35 +283,37 @@ async def callback_worker(call: types.CallbackQuery):
         msg = await call.message.edit_text("⏳ <b>AI ishlamoqda...</b>")
         loop = asyncio.get_event_loop()
         for i, img in enumerate(files):
-            # Progress
             if i % 2 == 0: await msg.edit_text(f"⏳ <b>Rasm {i+1}/{len(files)} tiniqlashtirilmoqda...</b>")
             res = await loop.run_in_executor(None, enhance_image, img)
             await call.message.answer_photo(BufferedInputFile(res, filename=f"hd_{i+1}.jpg"))
         await msg.delete(); GLOBAL_DATA[uid]['files'] = []
 
+    # 🔴 OCR PRO (XATOLIK TUZATILGAN) 🔴
     if action == "to_ocr":
         if not files: return
-        msg = await call.message.edit_text("⏳ <b>Matn o'qilmoqda (OCR)...</b>")
+        msg = await call.message.edit_text("⏳ <b>Matn o'qilmoqda (PRO OCR)...</b>")
         loop = asyncio.get_event_loop()
-        text = await loop.run_in_executor(None, ocr_process, files)
-        if len(text) > 4000:
-            await call.message.answer_document(BufferedInputFile(text.encode(), filename="matn.txt"))
+        
+        # Pro OCR funksiyasini chaqiramiz
+        text_result = await loop.run_in_executor(None, ocr_process_pro, files)
+        
+        # ⚠️ XAVFSIZLIK: < > & belgilarni html.escape() qilamiz
+        safe_text = html.escape(text_result)
+        
+        if len(safe_text) > 4000:
+            await call.message.answer_document(BufferedInputFile(text_result.encode(), filename="matn.txt"))
         else:
-            await call.message.answer(f"📝 <b>Natija:</b>\n\n{text}")
+            # Safe textni jo'natamiz
+            await call.message.answer(f"📝 <b>Natija:</b>\n\n<pre>{safe_text}</pre>")
+            
         await msg.delete(); GLOBAL_DATA[uid]['files'] = []
 
-    # PDF TO WORD (TEMP FILE FIX)
     if action == "pdf_to_docx":
-        msg = await call.message.edit_text("⏳ <b>Konvertatsiya ketmoqda (og'ir jarayon)...</b>")
+        msg = await call.message.edit_text("⏳ <b>Konvertatsiya ketmoqda...</b>")
         loop = asyncio.get_event_loop()
-        
-        # Temp file orqali xavfsiz konvertatsiya
         docx_bytes = await loop.run_in_executor(None, convert_pdf_to_docx_safe, GLOBAL_DATA[uid]['doc_content'])
-        
-        if docx_bytes:
-            await call.message.answer_document(BufferedInputFile(docx_bytes, filename="converted.docx"))
-        else:
-            await call.message.answer("❌ Xatolik yuz berdi yoki fayl shifrlangan.")
+        if docx_bytes: await call.message.answer_document(BufferedInputFile(docx_bytes, filename="converted.docx"))
+        else: await call.message.answer("❌ Xatolik.")
         await msg.delete()
 
     if action == "pdf_split":
@@ -341,33 +356,21 @@ with st.sidebar:
 
 if parol == ADMIN_PASS:
     st.success("Tizimga kirildi!")
-    
-    
-
-    t1, t2, t3 = st.tabs(["📊 Statistika", "ℹ️ Info & Sozlamalar", "⚙️ Tizim"])
+    t1, t2, t3 = st.tabs(["📊 Statistika", "ℹ️ Info", "⚙️ Tizim"])
     with t1:
         c1, c2, c3 = st.columns(3)
-        c1.metric("Server Threadlari", threading.active_count())
-        c2.metric("Foydalanuvchilar (RAM)", len(GLOBAL_DATA))
+        c1.metric("Threadlari", threading.active_count())
+        c2.metric("Userlar", len(GLOBAL_DATA))
         c3.metric("Baza", "Online 🟢")
-        st.subheader("Haftalik Foydalanish (Demo)")
         st.line_chart(pd.DataFrame(np.random.randn(20, 2), columns=['PDF', 'OCR']))
-
     with t2:
         st.markdown(f'<div class="info-box">{INFO_TEXT}</div>', unsafe_allow_html=True)
-
     with t3:
-        if st.button("🧹 RAMni Tozalash"):
-            GLOBAL_DATA.clear()
-            st.success("Tozalandi!")
+        if st.button("🧹 Tozalash"): GLOBAL_DATA.clear(); st.success("Tozalandi!")
 else:
-    # Login qilinmagan holat (Siz so'ragan chiroyli rasm)
     st.markdown("### 🤖 Universal AI Media Bot")
     st.image("https://img.freepik.com/free-vector/abstract-technology-particle-background_23-2148426649.jpg", use_column_width=True)
-    
     col1, col2 = st.columns(2)
-    with col1:
-        st.info("💡 **Botni ishlatish:** Telegramga kiring, **/start** bosing.")
-    with col2:
-        st.warning("🔒 **Xavfsizlik:** Ma'lumotlar serverda saqlanmaydi.")
+    with col1: st.info("💡 **Botni ishlatish:** Telegramga kiring, **/start** bosing.")
+    with col2: st.warning("🔒 **Xavfsizlik:** Ma'lumotlar serverda saqlanmaydi.")
     
