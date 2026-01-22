@@ -12,13 +12,11 @@ import pytesseract
 import img2pdf
 from PIL import Image, ImageEnhance
 from docx import Document
-from docx.shared import Inches, Pt
+from docx.shared import Inches
 from PyPDF2 import PdfReader, PdfWriter
 from pdf2docx import Converter
 from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import A4
-from reportlab.pdfbase import pdfmetrics
-from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.lib.utils import simpleSplit
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
@@ -29,12 +27,11 @@ import pandas as pd
 # --- 1. GLOBAL XOTIRA ---
 if "G_DATA" not in globals(): G_DATA = {}
 
-# --- 2. ADMIN PAROL & SOZLAMALAR ---
-# 🔐 ADMIN PAROL SHU YERDA:
+# --- 2. SOZLAMALAR ---
+# 🔐 ADMIN PAROL:
 ADMIN_PASS = "1221"
 
 st.set_page_config(page_title="AI Studio Pro", layout="wide", page_icon="💎")
-
 st.markdown("""
     <style>
     .main { background-color: #0e1117; }
@@ -47,98 +44,70 @@ try:
     BOT_TOKEN = st.secrets["telegram"]["BOT_TOKEN"]
     ADMIN_ID = str(st.secrets["telegram"]["ADMIN_ID"])
 except:
-    st.error("❌ Secrets (BOT_TOKEN, ADMIN_ID) sozlanmagan!")
+    st.error("❌ Secrets sozlanmagan!")
     st.stop()
 
-# --- 3. KUCHAYTIRILGAN MEDIA FUNKSIYALAR ---
+# --- 3. KUCHAYTIRILGAN FUNKSIYALAR ---
 
-def ocr_pro_high_quality(image_list):
-    """Eng yuqori sifatli OCR (Pre-processing bilan)"""
+def ocr_pro(image_list):
+    """Eng yuqori sifatli OCR"""
     full_text = ""
-    # Tesseract sozlamalari: --oem 3 (Neural Net), --psm 6 (Block text)
-    custom_config = r'--oem 3 --psm 6'
-    
+    cfg = r'--oem 3 --psm 6'
     for img_bytes in image_list:
         nparr = np.frombuffer(img_bytes, np.uint8)
         img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-        
-        # 1. Upscaling (2 barobar kattalashtirish)
+        # Upscale & Denoise & Threshold
         img = cv2.resize(img, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
-        
-        # 2. Grayscale & Denoising
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         gray = cv2.fastNlMeansDenoising(gray, None, 10, 7, 21)
-        
-        # 3. Binarization (Otsu Thresholding) - Matnni qora, fonni oq qiladi
         thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
         
-        # 4. OCR
-        pil_img = Image.fromarray(thresh)
-        text = pytesseract.image_to_string(pil_img, lang='uzb+rus+eng', config=custom_config)
+        text = pytesseract.image_to_string(Image.fromarray(thresh), lang='uzb+rus+eng', config=cfg)
         full_text += text + "\n\n----------------\n\n"
-        
     return full_text
 
-def create_pdf_from_text(text_content, filename="hujjat.pdf"):
-    """Matndan yoki DOCX dan PDF yasash (ReportLab)"""
+def create_pdf_from_text(text_content):
+    """Matndan PDF chizish (ReportLab)"""
     buffer = io.BytesIO()
     p = canvas.Canvas(buffer, pagesize=A4)
     width, height = A4
-    text_object = p.beginText(40, height - 40)
+    text_obj = p.beginText(40, height - 40)
+    text_obj.setFont("Helvetica", 12)
     
-    # Standart shrift (Kirillitsani qo'llamasligi mumkin, shuning uchun oddiy)
-    # Agar serverda shrift bo'lsa, TTFont bilan yuklash kerak. Hozircha standart:
-    text_object.setFont("Helvetica", 12)
-    
-    # Matnni sahifaga sig'dirish
-    lines = text_content.split('\n')
-    for line in lines:
-        # Uzun qatorlarni bo'lish
-        wrapped_lines = simpleSplit(line, "Helvetica", 12, width - 80)
-        for wrapped in wrapped_lines:
-            # Sahifa tugasa yangisini ochish
-            if text_object.getY() < 40:
-                p.drawText(text_object)
-                p.showPage()
-                text_object = p.beginText(40, height - 40)
-                text_object.setFont("Helvetica", 12)
-            text_object.textLine(wrapped)
-            
-    p.drawText(text_object)
-    p.save()
-    buffer.seek(0)
+    for line in text_content.split('\n'):
+        for wrapped in simpleSplit(line, "Helvetica", 12, width - 80):
+            if text_obj.getY() < 40:
+                p.drawText(text_obj); p.showPage()
+                text_obj = p.beginText(40, height - 40); text_obj.setFont("Helvetica", 12)
+            text_obj.textLine(wrapped)
+    p.drawText(text_obj); p.save(); buffer.seek(0)
     return buffer.getvalue()
 
 def docx_to_pdf_engine(docx_bytes):
-    """DOCX -> Matn -> PDF (Eng ishonchli usul)"""
+    """DOCX -> Matn -> PDF"""
     with tempfile.NamedTemporaryFile(delete=False, suffix=".docx") as tf:
-        tf.write(docx_bytes)
-        temp_path = tf.name
-    
+        tf.write(docx_bytes); path = tf.name
     try:
-        doc = Document(temp_path)
-        full_text = []
-        for para in doc.paragraphs:
-            full_text.append(para.text)
-        text_content = "\n".join(full_text)
-        return create_pdf_from_text(text_content)
+        doc = Document(path)
+        text = "\n".join([p.text for p in doc.paragraphs])
+        return create_pdf_from_text(text)
     finally:
-        if os.path.exists(temp_path): os.remove(temp_path)
+        if os.path.exists(path): os.remove(path)
 
 def convert_pdf_to_docx_safe(pdf_bytes):
+    """PDF -> DOCX (TempFile)"""
     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tf:
-        tf.write(pdf_bytes)
-        temp_pdf = tf.name
-    temp_docx = temp_pdf.replace(".pdf", ".docx")
+        tf.write(pdf_bytes); pdf_path = tf.name
+    docx_path = pdf_path.replace(".pdf", ".docx")
     try:
-        cv = Converter(temp_pdf)
-        cv.convert(temp_docx, start=0, end=None)
+        cv = Converter(pdf_path)
+        cv.convert(docx_path, start=0, end=None)
         cv.close()
-        with open(temp_docx, "rb") as f: return f.read()
+        with open(docx_path, "rb") as f: return f.read()
     except: return None
     finally:
-        if os.path.exists(temp_pdf): os.remove(temp_pdf)
-        if os.path.exists(temp_docx): os.remove(temp_docx)
+        if os.path.exists(pdf_path): os.remove(pdf_path)
+        if os.path.exists(docx_path): os.remove(docx_path)
 
 def enhance_image(img_bytes):
     nparr = np.frombuffer(img_bytes, np.uint8)
@@ -147,7 +116,7 @@ def enhance_image(img_bytes):
     pil = Image.fromarray(cv2.cvtColor(dst, cv2.COLOR_BGR2RGB))
     pil = ImageEnhance.Sharpness(pil).enhance(2.0)
     pil = ImageEnhance.Contrast(pil).enhance(1.2)
-    b = io.BytesIO(); pil.save(b, "JPEG", quality=95); return b.getvalue()
+    b = io.BytesIO(); pil.save(b, "JPEG"); return b.getvalue()
 
 def scan_effect(img_bytes):
     nparr = np.frombuffer(img_bytes, np.uint8)
@@ -215,7 +184,7 @@ async def text_handler(m: types.Message):
             loop = asyncio.get_event_loop()
             def do_split():
                 r = PdfReader(io.BytesIO(G_DATA[uid]['doc']))
-                w = PdfWriter()
+                w = PdfWriter(); 
                 for i in range(s-1, min(e, len(r.pages))): w.add_page(r.pages[i])
                 o = io.BytesIO(); w.write(o); return o.getvalue()
             pdf = await loop.run_in_executor(None, do_split)
@@ -248,7 +217,7 @@ async def photo_h(m: types.Message):
     
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📄 PDF Skaner", callback_data="to_pdf"), InlineKeyboardButton(text="📝 Word", callback_data="to_word")],
-        [InlineKeyboardButton(text="🔍 OCR PRO (Matn)", callback_data="to_ocr"), InlineKeyboardButton(text="✨ Enhance", callback_data="to_enhance")],
+        [InlineKeyboardButton(text="🔍 OCR PRO", callback_data="to_ocr"), InlineKeyboardButton(text="✨ Enhance", callback_data="to_enhance")],
         [InlineKeyboardButton(text="🗑 Tozalash", callback_data="clear")]
     ])
     await m.reply(f"✅ Rasm {len(G_DATA[uid]['files'])} ta.", reply_markup=kb)
@@ -286,9 +255,10 @@ async def call_h(c: types.CallbackQuery):
         if not files: return
         msg = await c.message.edit_text("⏳ <b>OCR PRO ishlamoqda...</b>")
         loop = asyncio.get_event_loop()
-        txt = await loop.run_in_executor(None, ocr_pro_high_quality, files)
-        if len(txt) > 4000: await c.message.answer_document(BufferedInputFile(txt.encode(), filename="ocr.txt"))
-        else: await c.message.answer(f"📝 <b>Natija:</b>\n<pre>{html.escape(txt)}</pre>")
+        txt = await loop.run_in_executor(None, ocr_pro, files)
+        safe_txt = html.escape(txt)
+        if len(safe_txt) > 4000: await c.message.answer_document(BufferedInputFile(txt.encode(), filename="ocr.txt"))
+        else: await c.message.answer(f"📝 <b>Natija:</b>\n<pre>{safe_txt}</pre>")
         await msg.delete(); G_DATA[uid]['files'] = []
 
     if d == "any2pdf": # DOCX/TXT -> PDF
@@ -296,10 +266,10 @@ async def call_h(c: types.CallbackQuery):
         loop = asyncio.get_event_loop()
         
         pdf_res = None
-        # Agar TXT bo'lsa
-        if b"%PDF" not in G_DATA[uid]['doc']: # Oddiy tekshiruv
+        # PDF Header tekshiruvi (binary)
+        if b"%PDF" not in G_DATA[uid]['doc']:
             try:
-                # Agar DOCX bo'lsa (binary signature orqali yoki shunchaki try/except)
+                # Agar DOCX bo'lsa
                 pdf_res = await loop.run_in_executor(None, docx_to_pdf_engine, G_DATA[uid]['doc'])
             except:
                 # Agar TXT bo'lsa
@@ -351,9 +321,16 @@ async def call_h(c: types.CallbackQuery):
 
 # --- RUNNER ---
 def run():
-    asyncio.run(bot.delete_webhook(drop_pending_updates=True))
-    asyncio.run(dp.start_polling(bot))
-if not any(t.name == "BT" for t in threading.enumerate()): threading.Thread(target=run, name="BT", daemon=True).start()
+    # 🔴 MUHIM: handle_signals=False (Xatolikni yo'qotadi)
+    new_loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(new_loop)
+    async def starter():
+        await bot.delete_webhook(drop_pending_updates=True)
+        await dp.start_polling(bot, handle_signals=False)
+    new_loop.run_until_complete(starter())
+
+if not any(t.name == "BT" for t in threading.enumerate()):
+    threading.Thread(target=run, name="BT", daemon=True).start()
 
 # --- WEB UI ---
 st.markdown('<p class="header-text">🛡️ AI Studio Pro</p>', unsafe_allow_html=True)
@@ -369,4 +346,3 @@ if p == ADMIN_PASS:
 else:
     st.image("https://img.freepik.com/free-vector/abstract-technology-particle-background_23-2148426649.jpg")
     st.info("Bot ishlashi uchun Telegramga kiring.")
-    
