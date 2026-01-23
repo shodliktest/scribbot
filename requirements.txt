@@ -1,12 +1,11 @@
 streamlit
-aiogram>=3.0.0
-Pillow
-numpy
+aiogram==3.4.1
+easyocr
 opencv-python-headless
-pytesseract
+numpy
+Pillow
 img2pdf
 python-docx
-pdf2docx
 PyPDF2
+pdf2docx
 reportlab
-pandas
