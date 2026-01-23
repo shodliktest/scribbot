@@ -1,13 +1,9 @@
 import streamlit as st
 import asyncio
 import threading
-import os
 import io
-import time
-import sqlite3
 import numpy as np
 import cv2
-import pytesseract
 import img2pdf
 from PIL import Image, ImageEnhance
 from aiogram import Bot, Dispatcher, types, F
@@ -15,258 +11,214 @@ from aiogram.filters import Command
 from aiogram.types import BufferedInputFile, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.client.default import DefaultBotProperties
 
-# --- 1. SOZLAMALAR VA XAVFSIZLIK ---
-st.set_page_config(page_title="Admin Panel", layout="wide", page_icon="🛡")
+# --- 1. SOZLAMALAR ---
+st.set_page_config(page_title="AI Scanner Admin", layout="wide", page_icon="🛡")
+
+# Global o'zgaruvchi (Bot xotirasi uchun)
+# DIQQAT: st.session_state o'rniga shu global lug'atni ishlatamiz
+USER_DATA = {}
 
 try:
+    # Agar mahalliy kompyuterda bo'lsa .streamlit/secrets.toml dan oladi
+    # Agar Cloud bo'lsa Settings -> Secrets dan oladi
     BOT_TOKEN = st.secrets["telegram"]["BOT_TOKEN"]
     ADMIN_ID = int(st.secrets["telegram"]["ADMIN_ID"])
     ADMIN_PASS = st.secrets["telegram"]["ADMIN_PASSWORD"]
-except:
-    st.error("❌ `.streamlit/secrets.toml` fayli noto'g'ri yoki mavjud emas!")
+except Exception as e:
+    st.error(f"Secrets xatosi: {e}")
     st.stop()
 
-DB_FILE = "bot_database.db"
-
-# --- 2. BAZA BILAN ISHLASH (Admin Broadcast uchun) ---
-def init_db():
-    with sqlite3.connect(DB_FILE, check_same_thread=False) as conn:
-        conn.execute("CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY, username TEXT)")
-
-def add_user(user_id, username):
-    with sqlite3.connect(DB_FILE, check_same_thread=False) as conn:
-        conn.execute("INSERT OR IGNORE INTO users VALUES (?, ?)", (user_id, username))
-
-def get_all_users():
-    with sqlite3.connect(DB_FILE, check_same_thread=False) as conn:
-        return [row[0] for row in conn.execute("SELECT user_id FROM users")]
-
-# --- 3. TASVIRNI QAYTA ISHLASH (CORE) ---
-def process_image_logic(img_bytes, action):
-    # Baytlarni OpenCV formatiga o'tkazish
+# --- 2. TASVIRNI QAYTA ISHLASH FUNKSIYALARI ---
+def apply_filter(img_bytes, filter_type):
+    """Rasmni tanlangan filtr asosida o'zgartirish"""
     nparr = np.frombuffer(img_bytes, np.uint8)
     img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
     
-    if action == "enhance":
-        # Sifatni oshirish
+    if filter_type == "document":
+        # Skaner effekti (Oq-qora va tiniq)
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        # Adaptive Threshold - soyalarni olib tashlaydi
+        processed = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2)
+        return processed
+    
+    elif filter_type == "magic":
+        # Ranglarni kuchaytirish (Magic Color)
         pil_img = Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
+        enhancer = ImageEnhance.Brightness(pil_img)
+        pil_img = enhancer.enhance(1.1)
         enhancer = ImageEnhance.Contrast(pil_img)
+        pil_img = enhancer.enhance(1.3)
+        enhancer = ImageEnhance.Sharpness(pil_img)
         pil_img = enhancer.enhance(1.5)
-        sharp = ImageEnhance.Sharpness(pil_img)
-        return "image", sharp.enhance(1.3)
+        return cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
+    
+    return img # Original holat
 
-    elif action == "ocr":
-        # Matn o'qish (OCR)
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        # Shovqinni tozalash
-        gray = cv2.medianBlur(gray, 3)
-        text = pytesseract.image_to_string(gray, lang='uzb+eng+rus')
-        return "text", text if text.strip() else "❌ Matnni aniqlab bo'lmadi."
-
-    elif action == "pdf":
-        # Hujjat Skaneri (Adaptive Threshold)
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        # Hujjat effekti berish (oq-qora toza skan)
-        scanned = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2)
-        pil_scanned = Image.fromarray(scanned)
+def generate_pdf(image_list, filter_type):
+    """Rasmlar ro'yxatidan PDF yaratish"""
+    processed_images = []
+    for img_b in image_list:
+        filtered = apply_filter(img_b, filter_type)
+        # Rasmni JPG formatida siqish (sifatni saqlagan holda)
+        _, buffer = cv2.imencode(".jpg", filtered, [cv2.IMWRITE_JPEG_QUALITY, 90])
+        processed_images.append(buffer.tobytes())
+    
+    # img2pdf yordamida A4 formatga moslash
+    if not processed_images:
+        raise Exception("Rasmlar ro'yxati bo'sh!")
         
-        # PDF ga aylantirish uchun JPEG ga o'tkazish
-        img_io = io.BytesIO()
-        pil_scanned.save(img_io, format="JPEG", quality=90)
-        pdf_bytes = img2pdf.convert(img_io.getvalue())
-        
-        pdf_io = io.BytesIO(pdf_bytes)
-        return "pdf", pdf_io
+    pdf_bytes = img2pdf.convert(processed_images)
+    return io.BytesIO(pdf_bytes)
 
-    elif action == "sketch":
-        # Style Transfer (Qalamda chizilgan effekt)
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        inv = 255 - gray
-        blur = cv2.GaussianBlur(inv, (21, 21), 0)
-        sketch = cv2.divide(gray, 255 - blur, scale=256)
-        return "image", Image.fromarray(sketch)
-
-    elif action == "cartoon":
-        # Style Transfer (Multfilm effekti)
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        gray = cv2.medianBlur(gray, 5)
-        edges = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY, 9, 9)
-        color = cv2.bilateralFilter(img, 9, 250, 250)
-        cartoon = cv2.bitwise_and(color, color, mask=edges)
-        return "image", Image.fromarray(cv2.cvtColor(cartoon, cv2.COLOR_BGR2RGB))
-
-# --- 4. TELEGRAM BOT (HANDLERS) ---
+# --- 3. TELEGRAM BOT SOZLAMALARI ---
+# Bot obyektini keshlaymiz
 @st.cache_resource
-def get_bot_instance():
-    """Singleton Bot Instance"""
+def get_bot():
     return Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
 
-bot = get_bot_instance()
+bot = get_bot()
 dp = Dispatcher()
-init_db()
 
+# --- 4. BOT HANDLERS ---
 @dp.message(Command("start"))
-async def start_cmd(m: types.Message):
-    add_user(m.from_user.id, m.from_user.username)
-    await m.answer(f"👋 Salom <b>{m.from_user.full_name}</b>!\n\n📸 Rasm yuboring, men uni professional darajada tahrirlab beraman.")
+async def cmd_start(m: types.Message):
+    uid = m.from_user.id
+    USER_DATA[uid] = [] # Foydalanuvchi xotirasini tozalash
+    
+    await m.answer(
+        f"👋 Salom <b>{m.from_user.full_name}</b>!\n\n"
+        "📸 Menga rasmlarni ketma-ket yuboring. Men ularni jamlab, "
+        "siz tanlagan uslubda (Skaner, Rangli yoki Asl holatda) PDF qilib beraman."
+    )
 
 @dp.message(F.photo)
-async def photo_processing(m: types.Message):
-    # DEFENDER: 25MB Limit
-    file_size = m.photo[-1].file_size
-    if file_size > 25 * 1024 * 1024:
-        await m.answer("❌ <b>Xatolik:</b> Fayl hajmi 25MB dan katta!")
+async def handle_photos(m: types.Message):
+    uid = m.from_user.id
+    
+    # Foydalanuvchi uchun joy ochamiz
+    if uid not in USER_DATA:
+        USER_DATA[uid] = []
+    
+    # DEFENDER: Maksimal 20 ta rasm
+    if len(USER_DATA[uid]) >= 20:
+        await m.answer("⚠️ Bitta PDF uchun maksimal 20 ta rasm limiti qo'yilgan.")
         return
 
-    # Menyular
+    # Rasmni yuklab olish
+    status_msg = await m.reply("📥 Yuklanmoqda...")
+    try:
+        file = await bot.get_file(m.photo[-1].file_id)
+        down = await bot.download_file(file.file_path)
+        USER_DATA[uid].append(down.read())
+        await status_msg.delete()
+    except Exception as e:
+        await status_msg.edit_text(f"❌ Xatolik: {e}")
+        return
+    
+    count = len(USER_DATA[uid])
+    
+    # Tugmalar
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✨ Sifatni oshirish", callback_data="do_enhance"),
-         InlineKeyboardButton(text="📝 OCR (Matn)", callback_data="do_ocr")],
-        [InlineKeyboardButton(text="📄 PDF Skaner", callback_data="do_pdf"),
-         InlineKeyboardButton(text="✏️ Sketch", callback_data="do_sketch")],
-        [InlineKeyboardButton(text="🎨 Cartoon", callback_data="do_cartoon")]
+        [InlineKeyboardButton(text=f"✅ PDF-ni yakunlash ({count} rasm)", callback_data="finish_menu")],
+        [InlineKeyboardButton(text="🗑 Tozalash", callback_data="clear_all")]
     ])
-    await m.reply("👇 Kerakli xizmatni tanlang:", reply_markup=kb)
+    
+    await m.answer(f"✅ {count}-rasm qo'shildi.", reply_markup=kb)
 
-@dp.callback_query(F.data.startswith("do_"))
-async def callback_worker(call: types.CallbackQuery):
-    action = call.data.split("_")[1]
+@dp.callback_query(F.data == "finish_menu")
+async def show_filter_menu(call: types.CallbackQuery):
+    uid = call.from_user.id
+    if uid not in USER_DATA or not USER_DATA[uid]:
+        await call.answer("Rasmlar yo'q!", show_alert=True)
+        return
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🖼 Asl holat (Original)", callback_data="pdf_original")],
+        [InlineKeyboardButton(text="📄 Hujjat (Oq-qora Skaner)", callback_data="pdf_document")],
+        [InlineKeyboardButton(text="✨ Yorqin (Magic Color)", callback_data="pdf_magic")],
+        [InlineKeyboardButton(text="⬅️ Bekor qilish", callback_data="clear_all")]
+    ])
+    await call.message.edit_text("🎨 PDF uslubini tanlang:", reply_markup=kb)
+
+@dp.callback_query(F.data.startswith("pdf_"))
+async def process_pdf(call: types.CallbackQuery):
+    uid = call.from_user.id
+    filter_type = call.data.split("_")[1] # original, document, magic
+    
+    if uid not in USER_DATA or not USER_DATA[uid]:
+        await call.message.edit_text("❌ Rasmlar topilmadi. Qaytadan /start bosing.")
+        return
+
     msg = call.message
-    photo = msg.reply_to_message.photo[-1]
-
-    # Progress Bar Funksiyasi
-    async def update_progress(text, percent):
-        bar_len = 10
-        filled = int(bar_len * percent / 100)
-        bar = "█" * filled + "░" * (bar_len - filled)
-        try:
-            await status_msg.edit_text(f"{text}\n`[{bar}] {percent}%`", parse_mode="Markdown")
-        except: pass
-
-    status_msg = await msg.answer("⏳ <b>Ulanmoqda...</b>")
+    status = await msg.edit_text(f"⏳ <b>{len(USER_DATA[uid])} ta sahifa tayyorlanmoqda...</b>\nBu biroz vaqt olishi mumkin.")
     
     try:
-        # 1. Yuklab olish
-        await update_progress("📥 Rasm yuklanmoqda...", 20)
-        file_info = await bot.get_file(photo.file_id)
-        downloaded = await bot.download_file(file_info.file_path)
-        img_bytes = downloaded.read()
-
-        # 2. Qayta ishlash
-        await update_progress("⚙️ AI ishlamoqda...", 60)
-        # CPU ishlashini bloklamaslik uchun Executor ishlatamiz
+        # Og'ir jarayonni alohida oqimda bajaramiz
         loop = asyncio.get_event_loop()
-        res_type, result = await loop.run_in_executor(None, process_image_logic, img_bytes, action)
-
-        # 3. Yuborish
-        await update_progress("📤 Natija yuklanmoqda...", 90)
+        pdf_io = await loop.run_in_executor(None, generate_pdf, USER_DATA[uid], filter_type)
         
-        if res_type == "image":
-            buf = io.BytesIO()
-            result.save(buf, format="JPEG", quality=95)
-            buf.seek(0)
-            await msg.answer_photo(BufferedInputFile(buf.read(), filename="edit.jpg"), caption="✅ <b>Tayyor!</b>")
+        # Fayl nomini chiroyli qilish
+        timestamp = int(time.time())
+        filename = f"Scan_{filter_type}_{timestamp}.pdf"
         
-        elif res_type == "text":
-            if len(result) > 4000:
-                # Agar matn uzun bo'lsa fayl qilamiz
-                buf = io.BytesIO(result.encode())
-                await msg.answer_document(BufferedInputFile(buf.read(), filename="ocr_text.txt"), caption="✅ <b>Matn faylda!</b>")
-            else:
-                await msg.answer(f"📝 <b>Natija:</b>\n\n{result}")
+        await msg.answer_document(
+            BufferedInputFile(pdf_io.read(), filename=filename),
+            caption=f"✅ <b>Tayyor!</b> ({filter_type} rejimi)\n🤖 Bot: @{(await bot.get_me()).username}"
+        )
         
-        elif res_type == "pdf":
-            result.seek(0)
-            await msg.answer_document(BufferedInputFile(result.read(), filename="hujjat.pdf"), caption="✅ <b>Professional Scan (PDF)</b>")
-
-        await status_msg.delete()
-
+        # Xotirani tozalash
+        USER_DATA[uid] = []
+        await status.delete()
+        
     except Exception as e:
-        await status_msg.edit_text(f"❌ <b>Xatolik:</b> {str(e)}")
+        await status.edit_text(f"❌ Xatolik yuz berdi: {str(e)}")
 
-# --- 5. BACKGROUND THREAD MANAGER (Killer Webhook) ---
-def run_bot_in_background():
-    """Botni alohida oqimda, xavfsiz ishga tushirish"""
-    async def runner():
-        # Webhookni o'ldirish (Pending update'larni tozalash)
-        await bot.delete_webhook(drop_pending_updates=True)
-        try:
-            await dp.start_polling(bot)
-        except Exception as e:
-            print(f"Bot Polling Error: {e}")
+@dp.callback_query(F.data == "clear_all")
+async def clear_data(call: types.CallbackQuery):
+    uid = call.from_user.id
+    USER_DATA[uid] = []
+    await call.message.edit_text("🗑 Barcha rasmlar o'chirildi. Yangi rasm yuborishingiz mumkin.")
 
-    # Yangi Loop yaratish (Streamlit Loop bilan konflikt bo'lmasligi uchun)
+# --- 5. ORQA FONDA BOTNI ISHLATISH (KILLER WEBHOOK) ---
+def start_bot_background():
+    # Yangi event loop ochamiz (Streamlitniki bilan arashmasligi uchun)
     new_loop = asyncio.new_event_loop()
     asyncio.set_event_loop(new_loop)
-    new_loop.run_until_complete(runner())
-
-# Singleton Thread Check
-if "bot_active" not in st.session_state:
-    thread_exists = False
-    for t in threading.enumerate():
-        if t.name == "SecureBotThread":
-            thread_exists = True
-            break
     
-    if not thread_exists:
-        t = threading.Thread(target=run_bot_in_background, name="SecureBotThread", daemon=True)
-        t.start()
-    st.session_state.bot_active = True
+    async def runner():
+        # Webhookni o'chirib tashlaymiz (eski update'lar tiqilib qolmasligi uchun)
+        await bot.delete_webhook(drop_pending_updates=True)
+        # Pollingni boshlaymiz
+        await dp.start_polling(bot, handle_signals=False)
 
-# --- 6. ADMIN PANEL (STREAMLIT UI) ---
-st.sidebar.title("🔐 Admin Login")
-password = st.sidebar.text_input("Parol", type="password")
+    try:
+        new_loop.run_until_complete(runner())
+    except Exception as e:
+        print(f"Bot to'xtadi: {e}")
 
-if password == ADMIN_PASS:
-    st.title("🎛 Admin Boshqaruv Paneli")
+# Thread himoyasi (Singleton)
+# Agar bot allaqachon ishlayotgan bo'lsa, qayta ishga tushirmaymiz
+if not any(t.name == "MainBotThread" for t in threading.enumerate()):
+    t = threading.Thread(target=start_bot_background, name="MainBotThread", daemon=True)
+    t.start()
+
+# --- 6. ADMIN PANEL (STREAMLIT) ---
+st.title("🛡 AI PDF Scanner Admin")
+
+# Kirish
+col1, col2 = st.columns([1, 2])
+with col1:
+    admin_pass = st.text_input("Admin Parol", type="password")
+
+if admin_pass == ADMIN_PASS:
+    st.success("✅ Tizimga kirildi")
     
-    # Statistika
-    users = get_all_users()
-    col1, col2, col3 = st.columns(3)
-    col1.metric("Jami Foydalanuvchilar", len(users))
-    col2.metric("Bot Holati", "🟢 Aktiv")
-    col3.metric("Server Threadlar", threading.active_count())
+    st.metric("Aktiv Threadlar", threading.active_count())
+    st.metric("Xotiradagi foydalanuvchilar (Vaqtinchalik)", len(USER_DATA))
     
-    st.divider()
-    
-    # Saytga kirish tugmasi (Simulyatsiya)
-    st.markdown("### 🌐 Sayt boshqaruvi")
-    if st.button("🔗 Admin Panelni Yangilash (Refresh Site)"):
-        st.rerun()
-
-    # Broadcast (Xabar tarqatish)
-    st.markdown("### 📢 Xabar Tarqatish")
-    msg_text = st.text_area("Xabar matnini kiriting:", height=100)
-    
-    if st.button("🚀 Hammaga Yuborish"):
-        if not msg_text:
-            st.warning("Matn yozilmadi!")
-        else:
-            progress = st.progress(0)
-            status_txt = st.empty()
-            
-            # Asinxron yuborish funksiyasi
-            async def send_broadcast():
-                count = 0
-                for i, uid in enumerate(users):
-                    try:
-                        await bot.send_message(uid, msg_text)
-                        count += 1
-                    except: pass
-                    # Progress barni yangilash
-                    percent = int((i + 1) / len(users) * 100)
-                    progress.progress(percent)
-                    status_txt.text(f"Yuborilmoqda: {i+1}/{len(users)}")
-                return count
-
-            # Streamlit ichida async ishlatish
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            sent_count = loop.run_until_complete(send_broadcast())
-            
-            st.success(f"✅ Xabar {sent_count} kishiga yuborildi!")
-
+    st.subheader("Foydalanuvchilarni tozalash")
+    if st.button("🧹 RAM Xotirani bo'shatish"):
+        USER_DATA.clear()
+        st.success("Xotira tozalandi!")
 else:
-    st.title("🤖 AI Bot Server")
-    st.info("Bot orqa fonda ishlamoqda. Admin panelga kirish uchun parolni kiriting.")
-    
+    st.info("Bot Telegramda ishlamoqda. Admin panelga kirish uchun parolni kiriting.")
