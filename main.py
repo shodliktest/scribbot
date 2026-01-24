@@ -31,46 +31,44 @@ if "G_DATA" not in globals():
 # --- 2. CONFIGURATION & AUTHENTICATION ---
 st.set_page_config(page_title="Google Vision AI Bot", layout="wide", page_icon="👁️")
 
-st.markdown("""
-    <style>
-    .main { background-color: #0e1117; }
-    .stMetric { background-color: #161b22; border: 1px solid #30363d; border-radius: 12px; padding: 15px; }
-    .header-text { color: #58a6ff; font-size: 40px; font-weight: bold; text-align: center; }
-    </style>
-    """, unsafe_allow_html=True)
-
-# Secrets va Google Auth sozlash
+# Streamlit sirli kalitlarini o'qish va Google JSON faylini yaratish
 try:
-    BOT_TOKEN = st.secrets["telegram"]["BOT_TOKEN"]
-    ADMIN_ID = str(st.secrets["telegram"]["ADMIN_ID"])
-    ADMIN_PASS = st.secrets["telegram"]["ADMIN_PASSWORD"]
+    # Telegram sozlamalari
+    if "telegram" in st.secrets:
+        BOT_TOKEN = st.secrets["telegram"]["BOT_TOKEN"]
+        ADMIN_ID = str(st.secrets["telegram"]["ADMIN_ID"])
+    else:
+        st.error("❌ 'telegram' bo'limi secrets.toml da topilmadi!")
+        st.stop()
 
-    # Google Credentials ni JSON faylga vaqtincha yozish (Kutubxona fayl so'raydi)
+    # Google Cloud sozlamalari
     if "gcp_service_account" in st.secrets:
-        service_account_info = dict(st.secrets["gcp_service_account"])
-        # Vaqtinchalik fayl yaratamiz
+        service_info = dict(st.secrets["gcp_service_account"])
+        
+        # MUHIM: Private Keydagi \n belgilarni to'g'rilash (Streamlit xatosi oldini olish uchun)
+        if "private_key" in service_info:
+            service_info["private_key"] = service_info["private_key"].replace("\\n", "\n")
+        
+        # Vaqtinchalik JSON fayl yaratish
         with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
-            json.dump(service_account_info, f)
+            json.dump(service_info, f)
             os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = f.name
     else:
-        st.warning("⚠️ Google Cloud Credentials topilmadi!")
+        st.warning("⚠️ Google Cloud Credentials ('gcp_service_account') topilmadi! Vision API ishlamaydi.")
 
 except Exception as e:
-    st.error(f"❌ Secrets xatosi: {e}")
+    st.error(f"❌ Secrets faylida xatolik: {e}")
     st.stop()
 
 # --- 3. GOOGLE VISION ENGINE & EFFECTS ---
 
 def google_vision_scan(image_bytes):
-    """
-    Google Cloud Vision API orqali eng kuchli OCR
-    """
+    """Google Cloud Vision API orqali matnni o'qish"""
     try:
         client = vision.ImageAnnotatorClient()
         content = image_bytes
         image = vision.Image(content=content)
-
-        # Matnni aniqlash (DOCUMENT_TEXT_DETECTION eng yaxshisi)
+        # DOCUMENT_TEXT_DETECTION - eng kuchli rejim
         response = client.document_text_detection(image=image)
         
         if response.error.message:
@@ -81,29 +79,23 @@ def google_vision_scan(image_bytes):
         return f"❌ Tizim xatosi: {e}"
 
 def process_image_effect(img_bytes, effect="original"):
-    """
-    Rasmga effekt berish (PDF yoki ko'rish uchun)
-    """
+    """Rasmga effekt berish (Oq-qora, HD)"""
     nparr = np.frombuffer(img_bytes, np.uint8)
     img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
     
     if effect == "bw": # Oq-Qora (Skaner effekti)
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        # Adaptive Threshold (soyalarni yo'qotadi)
         processed = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2)
         _, buf = cv2.imencode(".jpg", processed)
         return buf.tobytes()
         
     elif effect == "enhance": # Sifatni oshirish
-        # Denoising
         cleaned = cv2.fastNlMeansDenoisingColored(img, None, 10, 10, 7, 21)
-        # Sharpness oshirish
         pil_img = Image.fromarray(cv2.cvtColor(cleaned, cv2.COLOR_BGR2RGB))
         enhancer = ImageEnhance.Sharpness(pil_img)
-        sharpened = enhancer.enhance(1.5) # O'tkirlash
+        sharpened = enhancer.enhance(1.5)
         contrast = ImageEnhance.Contrast(sharpened)
-        final_pil = contrast.enhance(1.2) # Kontrast
-        
+        final_pil = contrast.enhance(1.2)
         buf = io.BytesIO()
         final_pil.save(buf, format="JPEG", quality=95)
         return buf.getvalue()
@@ -114,31 +106,24 @@ def process_image_effect(img_bytes, effect="original"):
 # --- 4. CONVERTERS ---
 
 def create_pdf_from_text(text_content):
-    """ReportLab orqali PDF yasash"""
     buffer = io.BytesIO()
     p = canvas.Canvas(buffer, pagesize=A4)
     width, height = A4
     text_obj = p.beginText(40, height - 40)
     text_obj.setFont("Helvetica", 12)
-    
     for line in text_content.split('\n'):
         wrapped_lines = simpleSplit(line, "Helvetica", 12, width - 80)
         for wrapped in wrapped_lines:
             if text_obj.getY() < 40:
-                p.drawText(text_obj)
-                p.showPage()
-                text_obj = p.beginText(40, height - 40)
-                text_obj.setFont("Helvetica", 12)
+                p.drawText(text_obj); p.showPage()
+                text_obj = p.beginText(40, height - 40); text_obj.setFont("Helvetica", 12)
             text_obj.textLine(wrapped)
-    p.drawText(text_obj)
-    p.save()
-    buffer.seek(0)
+    p.drawText(text_obj); p.save(); buffer.seek(0)
     return buffer.getvalue()
 
 def docx_to_pdf_engine(docx_bytes):
     with tempfile.NamedTemporaryFile(delete=False, suffix=".docx") as tf:
-        tf.write(docx_bytes)
-        path = tf.name
+        tf.write(docx_bytes); path = tf.name
     try:
         doc = Document(path)
         text = "\n".join([para.text for para in doc.paragraphs])
@@ -148,8 +133,7 @@ def docx_to_pdf_engine(docx_bytes):
 
 def convert_pdf_to_docx_safe(pdf_bytes):
     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tf:
-        tf.write(pdf_bytes)
-        temp_pdf = tf.name
+        tf.write(pdf_bytes); temp_pdf = tf.name
     temp_docx = temp_pdf.replace(".pdf", ".docx")
     try:
         cv = Converter(temp_pdf)
@@ -185,25 +169,22 @@ def main_kb(uid):
 INFO_TEXT = """
 <b>👁️ GOOGLE VISION AI BOT</b>
 
-📸 <b>Rasm imkoniyatlari:</b>
-• <b>🔍 Google OCR:</b> Dunyodagi eng aniq skaner!
-• <b>📄 PDF Skaner:</b> 3 xil rejim (Original, Oq-Qora, HD)
-• <b>✨ Sifatni oshirish:</b> Xira rasmlarni tiniqlash
+📸 <b>Rasm funksiyalari:</b>
+• <b>🔍 Google OCR:</b> Rasmdagi matnni o'qish (Eng aniq)
+• <b>📄 PDF Skaner:</b> Rasmlarni PDF qilish (HD sifat)
+• <b>✨ Tiniqlash:</b> Sifatni oshirish
 
-📄 <b>Fayl imkoniyatlari:</b>
-• DOCX/TXT → PDF
-• PDF → Word
-• Split PDF (Kesish)
-
-🎯 <b>Afzallik:</b> Audio yo'q, faqat hujjat va rasm bilan ishlaydi.
+📂 <b>Fayl funksiyalari:</b>
+• <b>PDF ➡️ Word</b> (Konvertatsiya)
+• <b>Word ➡️ PDF</b>
+• <b>Split PDF</b> (Kesish)
 """
 
 # --- 6. HANDLERS ---
-
 @dp.message(Command("start"))
 async def start(m: types.Message):
     G_DATA[m.from_user.id] = {'files': [], 'state': None}
-    await m.answer(f"👋 Salom {m.from_user.first_name}! Google Vision AI tayyor.", reply_markup=main_kb(m.from_user.id))
+    await m.answer(f"👋 Salom {m.from_user.first_name}!\nGoogle Vision AI ishlamoqda.", reply_markup=main_kb(m.from_user.id))
 
 @dp.message(F.text)
 async def text_handler(m: types.Message):
@@ -214,11 +195,10 @@ async def text_handler(m: types.Message):
         replied_text = m.reply_to_message.text or m.reply_to_message.caption or ""
         match = re.search(r"#ID(\d+)", replied_text)
         if match:
-            target_id = match.group(1)
             try:
-                await bot.send_message(target_id, f"👨‍💻 <b>Admin javobi:</b>\n\n{html.escape(txt)}")
+                await bot.send_message(match.group(1), f"👨‍💻 <b>Admin:</b>\n{html.escape(txt)}")
                 await m.answer("✅ Javob yuborildi.")
-            except: await m.answer("❌ Foydalanuvchi bloklagan.")
+            except: await m.answer("❌ Xatolik.")
         return
 
     if state == "split":
@@ -231,8 +211,8 @@ async def text_handler(m: types.Message):
                 for i in range(s-1, min(e, len(r.pages))): w.add_page(r.pages[i])
                 o = io.BytesIO(); w.write(o); return o.getvalue()
             pdf = await loop.run_in_executor(None, do_split)
-            await m.answer_document(BufferedInputFile(pdf, filename="kesilgan.pdf"), caption="✅ Tayyor")
-        except: await m.answer("❌ Xato! Misol: 1-5")
+            await m.answer_document(BufferedInputFile(pdf, filename="kesilgan.pdf"))
+        except: await m.answer("❌ Xato! Masalan: 1-5")
         G_DATA[uid]['state'] = None
         return
 
@@ -240,9 +220,9 @@ async def text_handler(m: types.Message):
     elif txt == "👨‍💻 Adminga murojaat":
         G_DATA[uid]['state'] = "contact"
         await m.answer("Xabarni yozing:", reply_markup=types.ReplyKeyboardRemove())
-    elif G_DATA.get(uid, {}).get('state') == "contact":
-        await bot.send_message(ADMIN_ID, f"📩 #ID{uid} dan murojaat:\n{html.escape(txt)}")
-        await m.answer("✅ Adminga yetkazildi.", reply_markup=main_kb(uid))
+    elif state == "contact":
+        await bot.send_message(ADMIN_ID, f"📩 #ID{uid} Userdan:\n{html.escape(txt)}")
+        await m.answer("✅ Yuborildi.", reply_markup=main_kb(uid))
         G_DATA[uid]['state'] = None
 
 @dp.message(F.photo)
@@ -250,32 +230,31 @@ async def photo_h(m: types.Message):
     uid = m.from_user.id
     if uid not in G_DATA: G_DATA[uid] = {'files': []}
     f = await bot.get_file(m.photo[-1].file_id)
-    content = await bot.download_file(f.file_path)
-    G_DATA[uid]['files'].append(content.read())
+    c = await bot.download_file(f.file_path)
+    G_DATA[uid]['files'].append(c.read())
     
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🔍 Google OCR", callback_data="to_ocr")],
-        [InlineKeyboardButton(text="✨ Tiniqlash (HD)", callback_data="to_enhance"), InlineKeyboardButton(text="📝 Wordga", callback_data="to_word")],
-        [InlineKeyboardButton(text="📄 PDF (Original)", callback_data="pdf_orig"), InlineKeyboardButton(text="📄 PDF (Oq-Qora)", callback_data="pdf_bw")],
+        [InlineKeyboardButton(text="✨ HD Sifat", callback_data="to_enhance"), InlineKeyboardButton(text="📝 Wordga", callback_data="to_word")],
+        [InlineKeyboardButton(text="📄 PDF (Orig)", callback_data="pdf_orig"), InlineKeyboardButton(text="📄 PDF (BW)", callback_data="pdf_bw")],
         [InlineKeyboardButton(text="🗑 Tozalash", callback_data="clear")]
     ])
-    await m.reply(f"✅ Rasm #{len(G_DATA[uid]['files'])} qabul qilindi.\nEffekt yoki amalni tanlang:", reply_markup=kb)
+    await m.reply(f"✅ Rasm #{len(G_DATA[uid]['files'])}.\nTanlang:", reply_markup=kb)
 
 @dp.message(F.document)
 async def doc_h(m: types.Message):
     uid = m.from_user.id
     f = await bot.get_file(m.document.file_id)
-    content = await bot.download_file(f.file_path)
-    G_DATA[uid] = {'doc': content.read(), 'state': None}
+    c = await bot.download_file(f.file_path)
+    G_DATA[uid] = {'doc': c.read(), 'state': None}
     
     kb = []
     if "pdf" in m.document.mime_type:
         kb = [[InlineKeyboardButton(text="✂️ Kesish", callback_data="split"), InlineKeyboardButton(text="📝 Wordga", callback_data="pdf2word")]]
     else:
         kb = [[InlineKeyboardButton(text="📄 PDFga", callback_data="any2pdf")]]
-    await m.reply(f"📂 {m.document.file_name} tayyor.", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
+    await m.reply(f"📂 {m.document.file_name}", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
 
-# --- CALLBACKS ---
 @dp.callback_query(F.data)
 async def call_worker(call: types.CallbackQuery):
     uid, d = call.from_user.id, call.data
@@ -283,120 +262,96 @@ async def call_worker(call: types.CallbackQuery):
 
     if d == "clear": 
         G_DATA[uid]['files'] = []
-        await call.message.delete()
-        await call.message.answer("🗑 Tozalandi."); return
+        await call.message.delete(); await call.message.answer("🗑 Tozalandi."); return
 
     if d == "to_ocr":
         if not files: return
-        msg = await call.message.edit_text("⏳ <b>Google Vision tahlil qilmoqda...</b>\n☁️ Serverga ulanish...")
-        
-        full_result = ""
+        msg = await call.message.edit_text("⏳ <b>Google Vision...</b>")
         loop = asyncio.get_event_loop()
+        res = ""
+        for i, img in enumerate(files):
+            txt = await loop.run_in_executor(None, google_vision_scan, img)
+            res += f"📄 Sahifa {i+1}:\n{html.escape(txt)}\n{'='*20}\n"
         
-        for idx, img in enumerate(files):
-            # Google Vision chaqirish
-            text = await loop.run_in_executor(None, google_vision_scan, img)
-            full_result += f"📄 <b>Sahifa {idx+1}:</b>\n\n{html.escape(text)}\n\n{'='*20}\n\n"
-        
-        if len(full_result) > 4000:
-            await call.message.answer_document(
-                BufferedInputFile(full_result.encode('utf-8'), filename="google_vision_result.txt"),
-                caption="✅ <b>Google OCR Natija</b> (Fayl)"
-            )
+        if len(res) > 3000:
+            await call.message.answer_document(BufferedInputFile(res.encode(), filename="ocr.txt"))
         else:
-            await call.message.answer(f"✅ <b>Google Vision Natija:</b>\n\n<pre>{full_result}</pre>")
-        
-        await msg.delete()
-        G_DATA[uid]['files'] = []
+            await call.message.answer(f"📝 <b>Natija:</b>\n<pre>{res}</pre>")
+        await msg.delete(); G_DATA[uid]['files'] = []
 
-    if d == "to_enhance":
-        if not files: return
-        msg = await call.message.edit_text("✨ <b>Sifat oshirilmoqda...</b>")
+    elif d == "to_enhance":
+        msg = await call.message.edit_text("✨ <b>Tiniqlashtirilmoqda...</b>")
         loop = asyncio.get_event_loop()
         for i, img in enumerate(files):
-            # Enhance effekti
             res = await loop.run_in_executor(None, process_image_effect, img, "enhance")
             await call.message.answer_photo(BufferedInputFile(res, filename=f"hd_{i+1}.jpg"))
         await msg.delete()
 
-    if d.startswith("pdf_"): # pdf_orig yoki pdf_bw
+    elif d.startswith("pdf_"):
         mode = d.split("_")[1]
-        msg = await call.message.edit_text(f"⏳ <b>PDF ({mode}) yaratilmoqda...</b>")
+        msg = await call.message.edit_text("⏳ <b>PDF yasalmoqda...</b>")
         loop = asyncio.get_event_loop()
-        
-        processed_imgs = []
+        processed = []
         for img in files:
-            res = await loop.run_in_executor(None, process_image_effect, img, mode)
-            processed_imgs.append(res)
-            
-        pdf = await loop.run_in_executor(None, img2pdf.convert, processed_imgs)
+            p = await loop.run_in_executor(None, process_image_effect, img, mode)
+            processed.append(p)
+        pdf = await loop.run_in_executor(None, img2pdf.convert, processed)
         await call.message.answer_document(BufferedInputFile(pdf, filename=f"scan_{mode}.pdf"))
-        await msg.delete()
-        G_DATA[uid]['files'] = []
+        await msg.delete(); G_DATA[uid]['files'] = []
 
-    if d == "to_word":
-        msg = await call.message.edit_text("⏳ <b>Rasmlar Wordga...</b>")
+    elif d == "to_word":
+        msg = await call.message.edit_text("⏳ <b>Wordga...</b>")
         loop = asyncio.get_event_loop()
         docx = await loop.run_in_executor(None, images_to_docx, files)
         await call.message.answer_document(BufferedInputFile(docx, filename="images.docx"))
-        await msg.delete()
-        G_DATA[uid]['files'] = []
-
-    if d == "any2pdf":
-        msg = await call.message.edit_text("⏳ <b>PDF yaratilmoqda...</b>")
+        await msg.delete(); G_DATA[uid]['files'] = []
+    
+    elif d == "any2pdf":
+        msg = await call.message.edit_text("⏳ <b>PDFga...</b>")
         loop = asyncio.get_event_loop()
-        pdf_res = None
-        doc_content = G_DATA[uid]['doc']
+        doc_c = G_DATA[uid]['doc']
         try:
-            if b"PK\x03\x04" in doc_content[:4]:
-                pdf_res = await loop.run_in_executor(None, docx_to_pdf_engine, doc_content)
-            else:
-                pdf_res = await loop.run_in_executor(None, create_pdf_from_text, doc_content.decode('utf-8', errors='ignore'))
-        except: pass
-        if pdf_res: await call.message.answer_document(BufferedInputFile(pdf_res, filename="hujjat.pdf"))
-        else: await call.message.answer("❌ Xatolik.")
+            if b"PK\x03\x04" in doc_c[:4]: pdf = await loop.run_in_executor(None, docx_to_pdf_engine, doc_c)
+            else: pdf = await loop.run_in_executor(None, create_pdf_from_text, doc_c.decode(errors='ignore'))
+            await call.message.answer_document(BufferedInputFile(pdf, filename="hujjat.pdf"))
+        except: await call.message.answer("❌ Xatolik.")
         await msg.delete()
 
-    if d == "pdf2word":
-        msg = await call.message.edit_text("⏳ <b>Wordga o'girilmoqda...</b>")
+    elif d == "pdf2word":
+        msg = await call.message.edit_text("⏳ <b>Wordga...</b>")
         loop = asyncio.get_event_loop()
         docx = await loop.run_in_executor(None, convert_pdf_to_docx_safe, G_DATA[uid]['doc'])
         if docx: await call.message.answer_document(BufferedInputFile(docx, filename="converted.docx"))
         else: await call.message.answer("❌ Xatolik.")
         await msg.delete()
-
-    if d == "split": 
+        
+    elif d == "split":
         G_DATA[uid]['state'] = "split"
-        await call.message.answer("✂️ Oraliqni yozing (Masalan: 1-5):")
+        await call.message.answer("✂️ Oraliqni yozing (1-3):")
 
-# --- 7. RUNNER ---
+# --- 7. RUNNER (MUHIM: THREADING FIX) ---
 def run_bot():
-    new_loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(new_loop)
-    async def starter():
-        await bot.delete_webhook(drop_pending_updates=True)
-        await dp.start_polling(bot, handle_signals=False)
-    new_loop.run_until_complete(starter())
+    """Botni alohida thread ichida xavfsiz ishga tushirish"""
+    try:
+        new_loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(new_loop)
+        
+        async def runner():
+            # Webhookni tozalash va Pollingni boshlash
+            await bot.delete_webhook(drop_pending_updates=True)
+            await dp.start_polling(bot, handle_signals=False)
+            
+        new_loop.run_until_complete(runner())
+    except Exception as e:
+        print(f"Bot Error: {e}")
 
+# Streamlit har safar yangilanganda thread qayta ochilmasligi uchun tekshiruv
 if not any(t.name == "AiogramThread" for t in threading.enumerate()):
-    threading.Thread(target=run_bot, name="AiogramThread", daemon=True).start()
+    t = threading.Thread(target=run_bot, name="AiogramThread", daemon=True)
+    t.start()
 
-# --- 8. ADMIN PANEL ---
-st.markdown('<p class="header-text">👁️ Google Vision Dashboard</p>', unsafe_allow_html=True)
-with st.sidebar:
-    st.image("https://cdn-icons-png.flaticon.com/512/4712/4712035.png", width=100)
-    p = st.text_input("Security Key", type="password")
-
-if p == ADMIN_PASS:
-    st.success("✅ Google Cloud API Connected")
-    c1, c2, c3 = st.columns(3)
-    c1.metric("👥 Userlar", len(G_DATA))
-    c2.metric("🔄 Threads", threading.active_count())
-    c3.metric("🧠 AI Engine", "Google Cloud Vision")
+# --- 8. DASHBOARD ---
+st.title("🛡️ AI Studio Pro - Vision Edition")
+st.success("Bot muvaffaqiyatli ishga tushdi! 🟢")
+st.write(f"Joriy Project ID: `{st.secrets['gcp_service_account']['project_id']}`")
     
-    st.markdown("---")
-    st.markdown("### 👁️ Google Vision Statistikasi:")
-    st.info("API ulanishi muvaffaqiyatli amalga oshirildi. JSON kalit xotirada mavjud.")
-else:
-    st.image("https://img.freepik.com/free-vector/abstract-technology-particle-background_23-2148426649.jpg")
-    st.info("🔐 Admin parolini kiriting")
