@@ -7,10 +7,10 @@ import re
 import tempfile
 import cv2
 import html
+import json
 import numpy as np
-import easyocr  # ⭐ Bu eng kuchli OCR
 import img2pdf
-from PIL import Image, ImageEnhance, ImageFilter
+from PIL import Image, ImageEnhance
 from docx import Document
 from docx.shared import Inches
 from PyPDF2 import PdfReader, PdfWriter
@@ -22,19 +22,14 @@ from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.types import BufferedInputFile, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.client.default import DefaultBotProperties
+from google.cloud import vision
 
 # --- 1. GLOBAL STORAGE ---
 if "G_DATA" not in globals():
     G_DATA = {} 
 
-if "OCR_READER" not in globals():
-    # ⭐ EasyOCR - bir marta yuklanadi va cache'da saqlanadi
-    OCR_READER = easyocr.Reader(['en', 'ru'], gpu=False)  # GPU=False Streamlit Cloud uchun
-
-# --- 2. CONFIGURATION ---
-ADMIN_PASS = "1221" 
-
-st.set_page_config(page_title="AI Studio Pro 2026", layout="wide", page_icon="💎")
+# --- 2. CONFIGURATION & AUTHENTICATION ---
+st.set_page_config(page_title="Google Vision AI Bot", layout="wide", page_icon="👁️")
 
 st.markdown("""
     <style>
@@ -44,120 +39,79 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
+# Secrets va Google Auth sozlash
 try:
     BOT_TOKEN = st.secrets["telegram"]["BOT_TOKEN"]
     ADMIN_ID = str(st.secrets["telegram"]["ADMIN_ID"])
-except:
-    st.error("❌ Secrets sozlanmagan!")
+    ADMIN_PASS = st.secrets["telegram"]["ADMIN_PASSWORD"]
+
+    # Google Credentials ni JSON faylga vaqtincha yozish (Kutubxona fayl so'raydi)
+    if "gcp_service_account" in st.secrets:
+        service_account_info = dict(st.secrets["gcp_service_account"])
+        # Vaqtinchalik fayl yaratamiz
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+            json.dump(service_account_info, f)
+            os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = f.name
+    else:
+        st.warning("⚠️ Google Cloud Credentials topilmadi!")
+
+except Exception as e:
+    st.error(f"❌ Secrets xatosi: {e}")
     st.stop()
 
-# --- 3. ⭐ ULTRA PRO OCR ENGINE (EasyOCR) ---
+# --- 3. GOOGLE VISION ENGINE & EFFECTS ---
 
-def preprocess_ultimate(img_bytes):
+def google_vision_scan(image_bytes):
     """
-    Rasmni OCR uchun optimal holatga keltirish
+    Google Cloud Vision API orqali eng kuchli OCR
+    """
+    try:
+        client = vision.ImageAnnotatorClient()
+        content = image_bytes
+        image = vision.Image(content=content)
+
+        # Matnni aniqlash (DOCUMENT_TEXT_DETECTION eng yaxshisi)
+        response = client.document_text_detection(image=image)
+        
+        if response.error.message:
+            return f"❌ Google API Xatosi: {response.error.message}"
+            
+        return response.full_text_annotation.text if response.full_text_annotation else "Matn topilmadi."
+    except Exception as e:
+        return f"❌ Tizim xatosi: {e}"
+
+def process_image_effect(img_bytes, effect="original"):
+    """
+    Rasmga effekt berish (PDF yoki ko'rish uchun)
     """
     nparr = np.frombuffer(img_bytes, np.uint8)
     img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
     
-    # 1. Kattalashtirish (Super Resolution)
-    h, w = img.shape[:2]
-    scale = 2 if min(h, w) < 1500 else 1.5
-    img = cv2.resize(img, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
-    
-    # 2. Kulrang
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    
-    # 3. Shovqinni tozalash
-    denoised = cv2.fastNlMeansDenoising(gray, None, 10, 7, 21)
-    
-    # 4. Kontrast oshirish (CLAHE)
-    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8,8))
-    enhanced = clahe.apply(denoised)
-    
-    # 5. Sharpening (O'tkirlik)
-    kernel = np.array([[-1,-1,-1], [-1,9,-1], [-1,-1,-1]])
-    sharpened = cv2.filter2D(enhanced, -1, kernel)
-    
-    return sharpened
-
-def format_ocr_result(result_list):
-    """
-    EasyOCR natijasini strukturalashtirilgan matn qilib qaytarish
-    """
-    # result_list: [([[x1,y1],[x2,y2],...], 'text', confidence), ...]
-    
-    # Y koordinatasi bo'yicha saralash (yuqoridan pastga)
-    sorted_results = sorted(result_list, key=lambda x: x[0][0][1])
-    
-    # Matnlarni birlashtirish
-    lines = []
-    current_line = []
-    current_y = None
-    
-    for detection in sorted_results:
-        bbox, text, conf = detection
-        y_coord = bbox[0][1]  # Yuqori chap burchak Y koordinatasi
+    if effect == "bw": # Oq-Qora (Skaner effekti)
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        # Adaptive Threshold (soyalarni yo'qotadi)
+        processed = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2)
+        _, buf = cv2.imencode(".jpg", processed)
+        return buf.tobytes()
         
-        # Agar yangi qator bo'lsa
-        if current_y is None or abs(y_coord - current_y) > 20:
-            if current_line:
-                lines.append(' '.join(current_line))
-            current_line = [text]
-            current_y = y_coord
-        else:
-            current_line.append(text)
-    
-    # Oxirgi qatorni qo'shish
-    if current_line:
-        lines.append(' '.join(current_line))
-    
-    return '\n'.join(lines)
+    elif effect == "enhance": # Sifatni oshirish
+        # Denoising
+        cleaned = cv2.fastNlMeansDenoisingColored(img, None, 10, 10, 7, 21)
+        # Sharpness oshirish
+        pil_img = Image.fromarray(cv2.cvtColor(cleaned, cv2.COLOR_BGR2RGB))
+        enhancer = ImageEnhance.Sharpness(pil_img)
+        sharpened = enhancer.enhance(1.5) # O'tkirlash
+        contrast = ImageEnhance.Contrast(sharpened)
+        final_pil = contrast.enhance(1.2) # Kontrast
+        
+        buf = io.BytesIO()
+        final_pil.save(buf, format="JPEG", quality=95)
+        return buf.getvalue()
+        
+    else: # Original
+        return img_bytes
 
-def ai_text_polish(text):
-    """
-    Matnni tozalash va formatlash
-    """
-    # Ortiqcha bo'shliqlarni olib tashlash
-    text = re.sub(r' +', ' ', text)
-    
-    # Har bir qatorni trim qilish
-    lines = [line.strip() for line in text.split('\n') if line.strip()]
-    
-    # Bo'sh qatorlarni saqlagan holda qaytarish
-    formatted = '\n\n'.join(lines)
-    
-    return formatted
-
-def ocr_process_ultimate(image_list):
-    """
-    ⭐ EasyOCR - Eng mukammal OCR engine
-    """
-    full_text = ""
-    
-    for idx, img_bytes in enumerate(image_list):
-        try:
-            # 1. Rasmni preprocessing qilish
-            processed_img = preprocess_ultimate(img_bytes)
-            
-            # 2. EasyOCR bilan matnni o'qish
-            result = OCR_READER.readtext(processed_img, paragraph=True)
-            
-            # 3. Natijani formatlash
-            page_text = format_ocr_result(result)
-            
-            # 4. Matnni tozalash
-            page_text = ai_text_polish(page_text)
-            
-            # 5. Sahifa qo'shish
-            if page_text.strip():
-                full_text += f"📄 Sahifa {idx + 1}:\n\n{page_text}\n\n"
-                full_text += "=" * 60 + "\n\n"
-            
-        except Exception as e:
-            full_text += f"⚠️ Sahifa {idx + 1} da xatolik: {str(e)}\n\n"
-    
-    return full_text if full_text.strip() else "❌ Matn topilmadi. Iltimos, sifatliroq rasm yuboring."
+# --- 4. CONVERTERS ---
 
 def create_pdf_from_text(text_content):
     """ReportLab orqali PDF yasash"""
@@ -207,7 +161,14 @@ def convert_pdf_to_docx_safe(pdf_bytes):
         if os.path.exists(temp_pdf): os.remove(temp_pdf)
         if os.path.exists(temp_docx): os.remove(temp_docx)
 
-# --- 4. BOT SETUP ---
+def images_to_docx(image_list):
+    doc = Document()
+    for img in image_list:
+        doc.add_picture(io.BytesIO(img), width=Inches(6))
+        doc.add_page_break()
+    b = io.BytesIO(); doc.save(b); return b.getvalue()
+
+# --- 5. BOT SETUP ---
 @st.cache_resource
 def get_bot():
     return Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
@@ -222,31 +183,27 @@ def main_kb(uid):
     return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
 
 INFO_TEXT = """
-<b>⭐ AI STUDIO 2026 - EASYOCR EDITION</b>
+<b>👁️ GOOGLE VISION AI BOT</b>
 
-📸 <b>Rasm yuborish:</b>
-• <b>🔍 ULTRA OCR:</b> EasyOCR AI Engine - 99.9% aniqlik!
-• <b>📄 PDF Skaner:</b> Professional sifat
-• <b>✨ Sifatli natija:</b> Strukturalashtirilgan matn
+📸 <b>Rasm imkoniyatlari:</b>
+• <b>🔍 Google OCR:</b> Dunyodagi eng aniq skaner!
+• <b>📄 PDF Skaner:</b> 3 xil rejim (Original, Oq-Qora, HD)
+• <b>✨ Sifatni oshirish:</b> Xira rasmlarni tiniqlash
 
-📄 <b>Fayllar:</b>
+📄 <b>Fayl imkoniyatlari:</b>
 • DOCX/TXT → PDF
 • PDF → Word
-• Split PDF
+• Split PDF (Kesish)
 
-🎯 <b>Afzalliklar:</b>
-✅ Deep Learning AI
-✅ 100+ tilni qo'llab-quvvatlash
-✅ Layout saqlash
-✅ Yuqori aniqlik
+🎯 <b>Afzallik:</b> Audio yo'q, faqat hujjat va rasm bilan ishlaydi.
 """
 
-# --- 5. HANDLERS ---
+# --- 6. HANDLERS ---
 
 @dp.message(Command("start"))
 async def start(m: types.Message):
     G_DATA[m.from_user.id] = {'files': [], 'state': None}
-    await m.answer(f"👋 Salom {m.from_user.first_name}! EasyOCR AI tayyor.", reply_markup=main_kb(m.from_user.id))
+    await m.answer(f"👋 Salom {m.from_user.first_name}! Google Vision AI tayyor.", reply_markup=main_kb(m.from_user.id))
 
 @dp.message(F.text)
 async def text_handler(m: types.Message):
@@ -297,10 +254,12 @@ async def photo_h(m: types.Message):
     G_DATA[uid]['files'].append(content.read())
     
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔍 ULTRA OCR", callback_data="to_ocr")],
-        [InlineKeyboardButton(text="📄 PDF Skaner", callback_data="to_pdf"), InlineKeyboardButton(text="🗑 Tozalash", callback_data="clear")]
+        [InlineKeyboardButton(text="🔍 Google OCR", callback_data="to_ocr")],
+        [InlineKeyboardButton(text="✨ Tiniqlash (HD)", callback_data="to_enhance"), InlineKeyboardButton(text="📝 Wordga", callback_data="to_word")],
+        [InlineKeyboardButton(text="📄 PDF (Original)", callback_data="pdf_orig"), InlineKeyboardButton(text="📄 PDF (Oq-Qora)", callback_data="pdf_bw")],
+        [InlineKeyboardButton(text="🗑 Tozalash", callback_data="clear")]
     ])
-    await m.reply(f"✅ Rasm #{len(G_DATA[uid]['files'])} qabul qilindi.\n⭐ EasyOCR AI tayyor!", reply_markup=kb)
+    await m.reply(f"✅ Rasm #{len(G_DATA[uid]['files'])} qabul qilindi.\nEffekt yoki amalni tanlang:", reply_markup=kb)
 
 @dp.message(F.document)
 async def doc_h(m: types.Message):
@@ -329,22 +288,57 @@ async def call_worker(call: types.CallbackQuery):
 
     if d == "to_ocr":
         if not files: return
-        msg = await call.message.edit_text("⏳ <b>EasyOCR AI ishga tushdi...</b>\n🧠 Deep Learning tahlil...")
+        msg = await call.message.edit_text("⏳ <b>Google Vision tahlil qilmoqda...</b>\n☁️ Serverga ulanish...")
+        
+        full_result = ""
         loop = asyncio.get_event_loop()
         
-        # ⭐ EasyOCR ishga tushirish
-        txt = await loop.run_in_executor(None, ocr_process_ultimate, files)
+        for idx, img in enumerate(files):
+            # Google Vision chaqirish
+            text = await loop.run_in_executor(None, google_vision_scan, img)
+            full_result += f"📄 <b>Sahifa {idx+1}:</b>\n\n{html.escape(text)}\n\n{'='*20}\n\n"
         
-        safe_txt = html.escape(txt)
-        
-        if len(txt) > 4000:
+        if len(full_result) > 4000:
             await call.message.answer_document(
-                BufferedInputFile(txt.encode('utf-8'), filename="easyocr_result.txt"),
-                caption="✅ <b>EasyOCR natija</b>\n📄 Fayl sifatida yuborildi (hajmi katta)"
+                BufferedInputFile(full_result.encode('utf-8'), filename="google_vision_result.txt"),
+                caption="✅ <b>Google OCR Natija</b> (Fayl)"
             )
         else:
-            await call.message.answer(f"✅ <b>EasyOCR AI natija:</b>\n\n<pre>{safe_txt}</pre>")
+            await call.message.answer(f"✅ <b>Google Vision Natija:</b>\n\n<pre>{full_result}</pre>")
         
+        await msg.delete()
+        G_DATA[uid]['files'] = []
+
+    if d == "to_enhance":
+        if not files: return
+        msg = await call.message.edit_text("✨ <b>Sifat oshirilmoqda...</b>")
+        loop = asyncio.get_event_loop()
+        for i, img in enumerate(files):
+            # Enhance effekti
+            res = await loop.run_in_executor(None, process_image_effect, img, "enhance")
+            await call.message.answer_photo(BufferedInputFile(res, filename=f"hd_{i+1}.jpg"))
+        await msg.delete()
+
+    if d.startswith("pdf_"): # pdf_orig yoki pdf_bw
+        mode = d.split("_")[1]
+        msg = await call.message.edit_text(f"⏳ <b>PDF ({mode}) yaratilmoqda...</b>")
+        loop = asyncio.get_event_loop()
+        
+        processed_imgs = []
+        for img in files:
+            res = await loop.run_in_executor(None, process_image_effect, img, mode)
+            processed_imgs.append(res)
+            
+        pdf = await loop.run_in_executor(None, img2pdf.convert, processed_imgs)
+        await call.message.answer_document(BufferedInputFile(pdf, filename=f"scan_{mode}.pdf"))
+        await msg.delete()
+        G_DATA[uid]['files'] = []
+
+    if d == "to_word":
+        msg = await call.message.edit_text("⏳ <b>Rasmlar Wordga...</b>")
+        loop = asyncio.get_event_loop()
+        docx = await loop.run_in_executor(None, images_to_docx, files)
+        await call.message.answer_document(BufferedInputFile(docx, filename="images.docx"))
         await msg.delete()
         G_DATA[uid]['files'] = []
 
@@ -371,19 +365,11 @@ async def call_worker(call: types.CallbackQuery):
         else: await call.message.answer("❌ Xatolik.")
         await msg.delete()
 
-    if d == "to_pdf":
-        msg = await call.message.edit_text("⏳ <b>PDF Skaner...</b>")
-        loop = asyncio.get_event_loop()
-        pdf = await loop.run_in_executor(None, img2pdf.convert, files)
-        await call.message.answer_document(BufferedInputFile(pdf, filename="scan.pdf"), caption="✅ Professional PDF!")
-        await msg.delete()
-        G_DATA[uid]['files'] = []
-
     if d == "split": 
         G_DATA[uid]['state'] = "split"
         await call.message.answer("✂️ Oraliqni yozing (Masalan: 1-5):")
 
-# --- 6. RUNNER ---
+# --- 7. RUNNER ---
 def run_bot():
     new_loop = asyncio.new_event_loop()
     asyncio.set_event_loop(new_loop)
@@ -395,29 +381,22 @@ def run_bot():
 if not any(t.name == "AiogramThread" for t in threading.enumerate()):
     threading.Thread(target=run_bot, name="AiogramThread", daemon=True).start()
 
-# --- 7. ADMIN PANEL ---
-st.markdown('<p class="header-text">⭐ EasyOCR AI Dashboard</p>', unsafe_allow_html=True)
+# --- 8. ADMIN PANEL ---
+st.markdown('<p class="header-text">👁️ Google Vision Dashboard</p>', unsafe_allow_html=True)
 with st.sidebar:
     st.image("https://cdn-icons-png.flaticon.com/512/4712/4712035.png", width=100)
     p = st.text_input("Security Key", type="password")
 
 if p == ADMIN_PASS:
-    st.success("✅ EasyOCR AI Online")
+    st.success("✅ Google Cloud API Connected")
     c1, c2, c3 = st.columns(3)
     c1.metric("👥 Userlar", len(G_DATA))
     c2.metric("🔄 Threads", threading.active_count())
-    c3.metric("🧠 AI Engine", "EasyOCR")
+    c3.metric("🧠 AI Engine", "Google Cloud Vision")
     
     st.markdown("---")
-    st.markdown("### ⭐ EasyOCR Afzalliklari:")
-    st.markdown("""
-    - 🧠 Deep Learning AI (Tesseract emas!)
-    - 📊 99.9% aniqlik
-    - 🌍 100+ til
-    - 📐 Layout saqlash
-    - ⚡ Tez ishlash
-    - 🎯 Qo'lda yozilgan matnni ham o'qiydi
-    """)
+    st.markdown("### 👁️ Google Vision Statistikasi:")
+    st.info("API ulanishi muvaffaqiyatli amalga oshirildi. JSON kalit xotirada mavjud.")
 else:
     st.image("https://img.freepik.com/free-vector/abstract-technology-particle-background_23-2148426649.jpg")
     st.info("🔐 Admin parolini kiriting")
